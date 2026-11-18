@@ -35,7 +35,7 @@ Response: `200`, `Content-Type: text/event-stream`. Each event has an `event:` n
 | `conversation` | `{"conversation_id": "uuid", "is_new": true}` | Always first. Tells the UI which conversation this is. |
 | `status` | `{"phase": "searching"}` | Optional progress hint while tools run. |
 | `delta` | `{"text": "partial text"}` | Streamed answer text; append in order. |
-| `done` | `{"message_id": "uuid", "remaining_messages": 2, "shortlist": ["slug", "..."]}` | Final event on success. |
+| `done` | `{"message_id": "uuid", "remaining_messages": 2, "shortlist": ["slug", "..."], "suggestions": ["Which of these is cheapest?", "..."]}` | Final event on success. `suggestions` holds up to two follow-up questions (may be empty); show them as tappable chips that send the text as the next message. |
 | `error` | `{"code": "model_unavailable", "message": "..."}` | Final event if something fails mid-stream. |
 
 ### Failures before streaming starts
@@ -78,6 +78,17 @@ Returns the stored history so the UI can restore a chat. `404` if not found or n
 
 Tool-call internals are not returned.
 
+## `POST /v1/messages/{id}/feedback`
+
+Thumbs up or down on an assistant message, so weak answers can be found and fixed.
+
+```json
+{ "helpful": true, "comment": "optional, up to 500 chars" }
+```
+
+`204` on success. `404` if the message is not found or not owned by the user. Sending it again replaces the
+earlier value. Does not use a free message.
+
 ## `GET /healthz`
 
 `200 {"status": "ok"}`. No auth. Used by the host's health check.
@@ -85,7 +96,9 @@ Tool-call internals are not returned.
 ## Notes for the UI
 
 - Show the answer as it streams; citations (source and verified date) arrive inside the text.
-- After `done`, update the remaining-messages counter from `remaining_messages`.
+- After `done`, update the remaining-messages counter from `remaining_messages`, and show `suggestions` as chips.
+- Show a thumbs up and down on each assistant answer and send it to the feedback endpoint.
+- Each follow-up chip uses one free message, so show the remaining count next to the input.
 - When `free_tier_exhausted` arrives, disable the input and show the limit message. Future phases will
   add a paid option here.
 - CORS allowed origins come from the `CORS_ORIGINS` environment variable.

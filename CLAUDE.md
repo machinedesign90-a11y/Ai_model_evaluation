@@ -1,7 +1,7 @@
 # CLAUDE.md
 
 Read this first, then `docs/BUILD_PLAN.md`. Specs live in `docs/AGENT_SPEC.md`, `docs/API_CONTRACT.md` and `docs/DATA_STANDARD.md`.
-**If the build is already underway, apply `docs/CHANGE_REQUEST_001.md` first.**
+**If the build is already underway, apply `docs/CHANGE_REQUEST_001.md`, then `docs/CHANGE_REQUEST_002.md`, first.**
 
 ## What we are building
 
@@ -25,7 +25,8 @@ UI (built by someone else)  ->  agent service (FastAPI, streaming)
                                    '-- Postgres (Supabase): catalog, users, conversations
 ```
 
-- The **MCP server** is a plain data interface (`search_models`, `get_model`, `compare_models`, `list_capabilities`) that any
+- The **MCP server** is a plain data interface (`search_models`, `get_model`, `compare_models`, `list_capabilities`, `find_verified_query`,
+  `run_verified_query`) that any
   outside agent could also use. Put the real logic in a shared `catalog` module; the MCP server and the
   agent both call it, so there is one implementation.
 - The **agent service** is the product on top. It holds the system prompt, calls Bedrock, runs the
@@ -55,6 +56,14 @@ UI (built by someone else)  ->  agent service (FastAPI, streaming)
 - The MCP server is **not exposed publicly** in phase one; the agent calls the catalog logic in-process.
   Exposing it later requires an API key first.
 - The agent's tool schemas given to Bedrock are flat (no `$ref` or recursion).
+- **Three answer tiers:** (1) verified queries, human-verified mappings from a question to a structured query
+  spec (the query is stored, never the answer); (2) a semantic layer of **measures** (compared or sorted:
+  clip length, image size, price) and **filters** (included or excluded: languages, open or closed) that the
+  agent composes a query spec from; (3) a review loop where unanswered and tier-2 questions are improved in
+  that order. The model builds a spec; the server compiles it to parameterized SQL.
+- Prices are numeric measures, one per unit (for example `price_usd_per_second`), so they can be compared and sorted.
+- Search quality and speed are the first impression: lead with a cited shortlist, never a dead end, and do not
+  spend a free message on an avoidable clarifying question (answer with a stated assumption).
 
 ## Hard rules
 
@@ -69,6 +78,8 @@ UI (built by someone else)  ->  agent service (FastAPI, streaming)
 6. Count the free-tier message **before** calling the model, and return a clear limit-reached
    response (see the API contract). Never let a failed model call silently refund or double-count without a test.
 7. Cap cost per turn: `MAX_TOOL_CALLS_PER_TURN`, `MAX_OUTPUT_TOKENS`.
+8. **Only a person verifies a query.** Code and the model may create `draft` or suggested entries, never
+   `verified`. The agent uses verified entries only.
 
 ## How to work
 
@@ -86,8 +97,17 @@ UI (built by someone else)  ->  agent service (FastAPI, streaming)
   conversations, messages, queries, row-level security. Tested on PostgreSQL 16.
 - `supabase/migrations/20261118150000_provenance_and_vocabulary.sql`: controlled vocabulary, alias tables,
   value validation, removes the uncited price and API columns. Tested on PostgreSQL 16.
+- `supabase/migrations/20261118180000_semantic_layer_and_verified_queries.sql`: measures and filters,
+  verified queries, review queue, numeric price measures, answer feedback. Transactional. Tested on PostgreSQL 16
+  (fresh install, upgrade path, failure path).
+- `supabase/migrations/20261118190000_review_queue_private.sql`: makes `review_queue` run with the caller's
+  rights and revokes client access (under Supabase's default grants any signed-in user could read it).
 - `supabase/seed/vocabulary_draft.sql`: draft starter vocabulary for the data team to confirm.
+- `supabase/seed/verified_queries_draft.sql`: draft verified queries (all `draft`; a person must verify them).
 - `.env.example`, `README.md`, and the docs in `docs/`.
-- Build steps 0 to 3 with change request 001 applied: settings, database test harness, `catalog/` (forgiving
-  search, `list_capabilities`), `mcp_server/` (four tools, `MCP_PUBLIC` / `MCP_API_KEY`), flat Bedrock tool
-  schemas (`agent/tool_specs.py`) and the system prompt (`agent/prompts/system_v2.md`).
+- Build steps 0 to 3 with change requests 001 and 002 applied: settings, database test harness, `catalog/`
+  (query-spec search over the semantic layer, tier-1 `find_verified_query` / `run_verified_query`,
+  `validate_verified_spec`, `list_capabilities`), `mcp_server/` (six tools, `MCP_PUBLIC` / `MCP_API_KEY`),
+  flat Bedrock tool schemas (`agent/tool_specs.py`), system prompt v3 (`agent/prompts/system_v3.md`) and the
+  semantic-layer renderer and cache (`agent/semantic_layer.py`). Steps 4 and 5 carry the rest of CR 002
+  (per-turn logging, `ttft_ms`, draft suggestions, `offer_followups`, API `suggestions` and feedback).

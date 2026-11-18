@@ -1,6 +1,6 @@
 # Build plan
 
-If the build is already underway, apply `docs/CHANGE_REQUEST_001.md` first. Then do these in order. Each step lists what to build and the acceptance checks. Do not start a step
+If the build is already underway, apply `docs/CHANGE_REQUEST_001.md` and then `docs/CHANGE_REQUEST_002.md` first. Then do these in order. Each step lists what to build and the acceptance checks. Do not start a step
 until the previous one passes its checks. Commit after each step.
 
 ## Step 0: Project setup
@@ -35,9 +35,10 @@ until the previous one passes its checks. Commit after each step.
 
 Implement, with typed pydantic models and parameterized SQL:
 
-- `search_models(modality, requirements, limit)`: forgiving, not exact-match (free-text terms resolved
+- `search_models(query spec: modality, filters, measures, sort, limit)`: forgiving, not exact-match (free-text terms resolved
   through aliases and trigram similarity; closest matches returned; see `docs/AGENT_SPEC.md`)
-- `list_capabilities(modality)`
+- `list_capabilities(modality)` (returns the measures and filters)
+- `find_verified_query(question)` and `run_verified_query(id, slots)` (tier 1; only `verified` entries)
 - `get_model(slug)`
 - `compare_models(slugs, capability_names)`
 
@@ -52,7 +53,7 @@ and partial matches so it is never empty when the modality has models.
 
 ## Step 3: MCP server (`mcp_server/`)
 
-- Expose the four tools using the official MCP Python SDK, wrapping `catalog/`. Clear tool descriptions
+- Expose the six catalog tools from Step 2 using the official MCP Python SDK, wrapping `catalog/`. Clear tool descriptions
   (the model reads them). Support streamable HTTP and stdio.
 - **Accept:** a test or script connects with an MCP client, lists the tools, and calls each one
   against fixture data.
@@ -65,6 +66,9 @@ and partial matches so it is never empty when the modality has models.
 - System prompt and the internal `save_context` tool exactly as in `docs/AGENT_SPEC.md`.
 - Flat tool schemas for Bedrock (no `$ref`, `$defs`, `anyOf`, `oneOf` or recursion), with a test that fails if
   any appears.
+- Three-tier flow per `docs/AGENT_SPEC.md`: verified query, then semantic search, then logging. Write a
+  `queries` row each turn (tier, spec, `ttft_ms`). Internal tools `save_context` and `offer_followups`.
+  System prompt v3, with the semantic layer loaded from the database and cached.
 - Conversation storage: create or resume a conversation, apply the 24-hour expiry rule, store messages
   with token counts, update `last_activity_at`.
 - Call `consume_message` once per user message, before the model call.
@@ -75,7 +79,7 @@ and partial matches so it is never empty when the modality has models.
 ## Step 5: Chat API (`agent/api`)
 
 Implement exactly `docs/API_CONTRACT.md`: `POST /v1/chat` (Server-Sent Events), `GET /v1/me`,
-`GET /v1/conversations/{id}`, `GET /healthz`. Validate the Supabase JWT on every request except health.
+`GET /v1/conversations/{id}`, `POST /v1/messages/{id}/feedback`, `GET /healthz`. Validate the Supabase JWT on every request except health.
 Include a `MOCK_AGENT=true` mode that streams canned responses and the limit-reached case so the UI
 developer can build against it before Bedrock is connected.
 
@@ -106,6 +110,8 @@ developer can build against it before Bedrock is connected.
   (boolean), `must_not_claim` (list). Provide the schema and 3 fictional examples.
 - `scripts/run_eval.py --model <bedrock-model-id>` runs every question through the real agent and writes a
   results table (pass or fail per question, tokens, latency, cost estimate).
+- The harness reports per question which tier answered it, time to first text, tokens and estimated cost, so
+  tier-1 coverage and latency are visible.
 - **Accept:** runs against fixture data with the fake model; the owner fills real questions once the database is populated.
 
 ## Out of scope for this build
@@ -120,3 +126,4 @@ developer can build against it before Bedrock is connected.
 - Which Bedrock model to start with, once step 8 gives evidence.
 - Final free-tier limit (default 4).
 - Similarity threshold and tie rules for approximate matching (start at 0.4, tune against the test set).
+- Tier-1 candidate floor (start 0.15) and whether `pgvector` is needed after measuring top-3 hit rates.
