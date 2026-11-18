@@ -132,3 +132,22 @@ async def test_streamable_http_transport(http_server):
         )
     assert [m["slug"] for m in c["models"]] == ["testco-alpha", "testco-beta", "testco-gamma"]
     json.dumps(c)  # plain JSON all the way through
+
+
+@pytest.mark.parametrize("host", ["0.0.0.0", "::", "10.0.0.5", "example.com"])
+def test_http_refuses_non_loopback_hosts(catalog_dsn, host):
+    proc = subprocess.run(
+        [sys.executable, "-m", "mcp_server", "--transport", "http", "--host", host, "--port", "1"],
+        env=_env(catalog_dsn),
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert proc.returncode != 0 and "no authentication" in proc.stderr
+
+
+def test_loopback_hosts_allowed():
+    from mcp_server.__main__ import is_loopback
+
+    assert all(is_loopback(h) for h in ("localhost", "127.0.0.1", "::1"))
