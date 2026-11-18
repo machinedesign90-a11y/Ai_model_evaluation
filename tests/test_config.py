@@ -26,3 +26,18 @@ def test_defaults_and_cors_list(monkeypatch):
     )  # fmt: skip
     assert s.cors_origin_list == ["http://a.test", "http://b.test"]
     assert "p@" not in repr(s)
+
+
+def test_mcp_public_defaults_off_and_needs_a_long_key(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@localhost:5432/db")
+    monkeypatch.delenv("MCP_API_KEY", raising=False)
+    monkeypatch.delenv("MCP_PUBLIC", raising=False)
+    assert Settings(_env_file=None).mcp_public is False
+    monkeypatch.setenv("MCP_PUBLIC", "true")
+    with pytest.raises(ValidationError, match="MCP_API_KEY"):
+        Settings(_env_file=None)
+    monkeypatch.setenv("MCP_API_KEY", "short")
+    with pytest.raises(ValidationError, match="MCP_API_KEY"):
+        Settings(_env_file=None)
+    monkeypatch.setenv("MCP_API_KEY", "x" * 32)
+    assert Settings(_env_file=None).mcp_public is True

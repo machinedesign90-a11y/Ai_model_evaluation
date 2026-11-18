@@ -1,158 +1,110 @@
-"""Step 2: catalog tools against the fictional fixture catalog."""
+"""get_model, compare_models, list_capabilities, and untrusted/injection-style input, on fictional data."""
 
 from __future__ import annotations
 
 import psycopg
 import pytest
 
-from catalog import CatalogInputError, compare_models, get_model, search_models
+from catalog import CatalogInputError, compare_models, get_model, list_capabilities, search_models
 from tests.fixtures import INJECTION_TEXT
-
-
-def slugs(items):
-    return [i.slug for i in items]
-
-
-# --- search_models -----------------------------------------------------------------------------
-
-
-async def test_search_match_by_array_containment(aconn):
-    r = await search_models(aconn, "video", [{"name": "output_languages", "value": "hi"}])
-    assert slugs(r.matches) == ["testco-alpha"]
-    fact = r.matches[0].facts[0]
-    assert fact.name == "output_languages" and fact.value == ["hi", "en"]
-    assert fact.source_type == "official_docs" and fact.source_url.startswith("https://docs.testco.example")
-    assert fact.verification_status == "verified" and fact.last_verified_at is not None
-    assert r.searched_modality == "video" and r.total_models_in_modality == 3
-
-
-async def test_search_reports_unrecorded_capability_as_unconfirmed(aconn):
-    r = await search_models(aconn, "video", [{"name": "output_languages", "value": "hi"}])
-    # Beta records ["en"]: contradicts, so dropped. Gamma has no row: unconfirmed, not silently dropped.
-    assert slugs(r.unconfirmed) == ["testco-gamma"]
-    assert r.unconfirmed[0].missing_capabilities == ["output_languages"]
-    assert "testco-beta" not in slugs(r.matches) + slugs(r.unconfirmed)
-
-
-async def test_search_multiple_requirements_and_unverified_facts(aconn):
-    r = await search_models(
-        aconn,
-        "video",
-        [{"name": "output_languages", "value": "en"}, {"name": "audio_generation", "value": True}],
-    )
-    assert slugs(r.matches) == ["testco-alpha", "testco-beta"]  # more verified facts first
-    beta = r.matches[1]
-    statuses = {f.name: f.verification_status for f in beta.facts}
-    assert statuses == {"output_languages": "verified", "audio_generation": "unverified"}
-    assert slugs(r.unconfirmed) == ["testco-gamma"]
-    assert [f.name for f in r.unconfirmed[0].facts] == ["audio_generation"]
-
-
-async def test_search_no_match(aconn):
-    r = await search_models(aconn, "video", [{"name": "output_languages", "value": "fr"}])
-    assert r.matches == [] and r.total_matches == 0
-    assert slugs(r.unconfirmed) == ["testco-gamma"]
-
-
-async def test_search_unknown_modality_lists_available(aconn):
-    r = await search_models(aconn, "Videos", [])
-    assert r.total_models_in_modality == 0 and r.matches == []
-    assert r.available_modalities == ["text", "video"]
-
-
-async def test_search_modality_is_case_insensitive_and_optional(aconn):
-    assert (await search_models(aconn, " VIDEO ")).total_models_in_modality == 3
-    r = await search_models(aconn, None, [{"name": "context_window", "value": 100000}])
-    assert r.searched_modality is None and r.total_models_in_modality == 4
-    assert slugs(r.matches) == ["testco-delta"]
-
-
-async def test_search_flags_capability_names_nobody_has(aconn):
-    r = await search_models(aconn, "video", [{"name": "voiceover_languages", "value": "hi"}])
-    assert r.unknown_capability_names == ["voiceover_languages"]
-    assert "output_languages" in r.known_capability_names
-    known = await search_models(aconn, "video", [{"name": "output_languages", "value": "hi"}])
-    assert known.unknown_capability_names == [] and known.known_capability_names == []
-
-
-async def test_search_limit_is_clamped_and_totals_reported(aconn):
-    r = await search_models(aconn, "video", [], limit=1)
-    assert len(r.matches) == 1 and r.total_matches == 3
-    assert len((await search_models(aconn, "video", [], limit=500)).matches) == 3
-
-
-async def test_search_rejects_bad_input(aconn):
-    with pytest.raises(CatalogInputError):
-        await search_models(aconn, "video", [{"name": "", "value": 1}])
-    with pytest.raises(CatalogInputError):
-        await search_models(aconn, "video", [{"name": "a", "value": 1}] * 11)
-
 
 # --- get_model ---------------------------------------------------------------------------------
 
 
-async def test_get_model_returns_all_facts_with_provenance(aconn):
-    r = await get_model(aconn, "TestCo-Alpha ")
-    assert r.status == "found"
-    m = r.model
-    assert (m.name, m.provider, m.modality) == ("TestModel Alpha", "TestCo", "video")
-    assert [f.name for f in m.facts] == [
-        "api_available", "audio_generation", "max_resolution", "output_languages", "pricing",
-    ]  # fmt: skip
-    facts = {f.name: f for f in m.facts}
-    assert facts["pricing"].value == {"currency": "USD", "unit": "second of video", "amount": 0.5}
-    assert facts["pricing"].verification_status == "verified" and facts["pricing"].source_type == "official_docs"
-    assert facts["api_available"].value is True
-    res = next(f for f in m.facts if f.name == "max_resolution")
-    assert res.verification_status == "unverified" and res.source_type == "scraped" and res.last_verified_at is None
+async def test_get_model_returns_all_facts_with_provenance_including_price_and_api(aconn):
+    r = await get_model(aconn, "testco-alpha")
+    assert (r.status, r.matched_by) == ("found", "slug")
+    facts = {f.name: f for f in r.model.facts}
+    assert list(facts) == sorted(facts)
+    assert facts["pricing"].value == {"unit": "per_second", "amount": 0.5, "currency": "USD"}
+    assert facts["pricing"].verification_status == "verified" and facts["pricing"].source_url
+    assert facts["api_available"].value is True and facts["api_available"].source_type == "official_docs"
+    assert (
+        facts["max_resolution"].verification_status == "unverified" and facts["max_resolution"].last_verified_at is None
+    )
 
 
-async def test_get_model_unrecorded_pricing_and_api_are_simply_absent(aconn):
-    m = (await get_model(aconn, "testco-gamma")).model
-    assert [f.name for f in m.facts] == ["audio_generation"]
-    assert m.display_description is None
+@pytest.mark.parametrize(
+    ("term", "matched_by"),
+    [("TestModel Alpha", "name"), ("testmodel alpha", "name"), ("TESTCO alpha", "name"),
+     ("TestModel Alfa", "approximate"), (" testco-alpha ", "slug")],
+)  # fmt: skip
+async def test_get_model_by_name_and_misspelling(aconn, term, matched_by):
+    r = await get_model(aconn, term)
+    assert r.model.slug == "testco-alpha" and r.matched_by == matched_by
 
 
-async def test_get_model_unknown_slug_suggests(aconn):
-    r = await get_model(aconn, "testco-alfa")
+async def test_get_model_not_found_suggests(aconn):
+    r = await get_model(aconn, "zzzz qqqq")
     assert r.status == "not_found" and r.model is None
-    assert slugs(r.suggestions)[0] == "testco-alpha"
-    assert (await get_model(aconn, "zzzzzzzzzz")).suggestions == []
+    r = await get_model(aconn, "testmodel")  # several equally close: not guessed
+    assert r.status == "not_found" and len(r.suggestions) >= 2
+
+
+async def test_unrecorded_price_and_api_are_simply_absent(aconn):
+    m = (await get_model(aconn, "testco-gamma")).model
+    assert {f.name for f in m.facts} == {"audio_generation", "max_resolution"}
+    assert m.display_description is None
 
 
 # --- compare_models ----------------------------------------------------------------------------
 
 
-async def test_compare_two_models_defaults_to_union_of_capabilities(aconn):
+async def test_compare_defaults_to_union_and_reports_not_recorded(aconn):
     r = await compare_models(aconn, ["testco-alpha", "testco-gamma"])
-    assert r.capability_names == ["api_available", "audio_generation", "max_resolution", "output_languages", "pricing"]
+    assert "pricing" in r.capability_names and "api_available" in r.capability_names
     alpha, gamma = r.models
     assert alpha.not_recorded == []
-    assert [f.name for f in gamma.facts] == ["audio_generation"]
-    assert gamma.not_recorded == ["api_available", "max_resolution", "output_languages", "pricing"]
+    assert "speech_languages" in gamma.not_recorded and "pricing" in gamma.not_recorded
 
 
-async def test_compare_three_models_with_named_capabilities_keeps_order(aconn):
-    r = await compare_models(aconn, ["testco-gamma", "testco-alpha", "testco-beta"], ["output_languages", "fps"])
-    assert slugs(r.models) == ["testco-gamma", "testco-alpha", "testco-beta"]
-    assert r.capability_names == ["output_languages", "fps"]
-    assert {m.slug: m.not_recorded for m in r.models} == {
-        "testco-gamma": ["output_languages", "fps"],
-        "testco-alpha": ["fps"],
-        "testco-beta": ["fps"],
-    }
+async def test_compare_accepts_names_and_everyday_capability_words(aconn):
+    r = await compare_models(
+        aconn, ["TestModel Alpha", "testco-beta", "TestModel Gama"], ["price", "resolution", "dubbing", "lip sync"]
+    )
+    assert [(m.slug, m.matched_by) for m in r.models] == [
+        ("testco-alpha", "name"), ("testco-beta", "slug"), ("testco-gamma", "approximate"),
+    ]  # fmt: skip
+    assert r.capability_names == ["pricing", "max_resolution", "speech_languages"]
+    assert [(c.input, c.capability, c.confidence) for c in r.capability_interpretation] == [
+        ("price", "pricing", "alias"),
+        ("resolution", "max_resolution", "alias"),
+        ("dubbing", "speech_languages", "alias"),
+    ]
+    assert [(u.part, u.term) for u in r.unresolved] == [("capability", "lip sync")]
+    beta = r.models[1]
+    assert beta.not_recorded == ["pricing"]
 
 
-async def test_compare_reports_invalid_slug(aconn):
-    r = await compare_models(aconn, ["testco-alpha", "testco-betta"])
-    assert slugs(r.models) == ["testco-alpha"]
-    assert r.not_found[0].slug == "testco-betta" and slugs(r.not_found[0].suggestions)[0] == "testco-beta"
+async def test_compare_reports_unknown_and_duplicate_models(aconn):
+    r = await compare_models(aconn, ["testco-alpha", "zzzz qqqq", "TestModel Alpha"])
+    assert [m.slug for m in r.models] == ["testco-alpha"]
+    assert [u.term for u in r.unresolved] == ["zzzz qqqq", "TestModel Alpha"]
 
 
 @pytest.mark.parametrize("bad", [["testco-alpha"], ["a", "b", "c", "d"], ["testco-alpha", "TESTCO-ALPHA"]])
-async def test_compare_needs_two_or_three_distinct_slugs(aconn, bad):
+async def test_compare_needs_two_or_three_distinct_entries(aconn, bad):
     with pytest.raises(CatalogInputError):
         await compare_models(aconn, bad)
+
+
+# --- list_capabilities -------------------------------------------------------------------------
+
+
+async def test_list_capabilities_filters_by_modality(aconn):
+    video = await list_capabilities(aconn, "Videos")
+    names = {c.name for c in video.capabilities}
+    assert video.modality == "video"
+    assert {"speech_languages", "max_resolution", "pricing", "api_available"} <= names
+    assert "context_window_tokens" not in names
+    speech = next(c for c in video.capabilities if c.name == "speech_languages")
+    assert speech.value_type == "enum_list" and "hi" in speech.allowed_values and speech.example_aliases
+    assert len((await list_capabilities(aconn)).capabilities) == 12
+
+
+async def test_list_capabilities_for_a_modality_with_no_models_yet(aconn):
+    r = await list_capabilities(aconn, "speech")
+    assert r.modality == "speech" and "speech_languages" in {c.name for c in r.capabilities}
 
 
 # --- untrusted text and injection-style inputs -------------------------------------------------
@@ -161,7 +113,6 @@ async def test_compare_needs_two_or_three_distinct_slugs(aconn, bad):
 async def test_catalog_text_is_returned_verbatim_as_data(aconn):
     m = (await get_model(aconn, "testco-delta")).model
     assert m.display_description == INJECTION_TEXT
-    assert next(f for f in m.facts if f.name == "notes").value == INJECTION_TEXT
 
 
 INJECTIONS = [
@@ -176,15 +127,14 @@ INJECTIONS = [
 
 @pytest.mark.parametrize("evil", INJECTIONS)
 async def test_sql_injection_style_inputs_are_plain_data(aconn, catalog_dsn, evil):
-    assert (await get_model(aconn, evil)).status == "not_found"
-    r = await search_models(aconn, evil, [{"name": evil, "value": evil}])
-    assert r.total_models_in_modality == 0
-    r = await search_models(aconn, "video", [{"name": evil, "value": {"k": evil}}])
-    assert r.matches == [] and r.unknown_capability_names == [evil.strip()]
-    r = await compare_models(aconn, ["testco-alpha", evil], [evil])
-    assert r.capability_names == [evil.strip()] and len(r.not_found) == 1
+    r = await get_model(aconn, evil)
+    assert r.status == "not_found" or r.model.slug == "testco-alpha"  # the union string contains the slug
+    r = await search_models(aconn, evil, [{"capability": evil, "value": evil}])
+    assert r.searched_modality is None
+    await compare_models(aconn, ["testco-alpha", evil], [evil])
+    await list_capabilities(aconn, evil[:50])
     with psycopg.connect(catalog_dsn) as conn:
-        assert conn.execute("select count(*) from models").fetchone()[0] == 4
+        assert conn.execute("select count(*) from models").fetchone()[0] == 5
 
 
 async def test_catalog_works_on_a_read_only_connection(catalog_dsn):
@@ -192,8 +142,9 @@ async def test_catalog_works_on_a_read_only_connection(catalog_dsn):
     async with await psycopg.AsyncConnection.connect(
         catalog_dsn, autocommit=True, options="-c default_transaction_read_only=on"
     ) as conn:
-        await search_models(conn, "video", [{"name": "output_languages", "value": "hi"}])
-        await get_model(conn, "testco-alpha")
-        await compare_models(conn, ["testco-alpha", "testco-beta"])
+        await search_models(conn, "video", [{"capability": "Hindi voiceover"}])
+        await get_model(conn, "TestModel Alfa")
+        await compare_models(conn, ["testco-alpha", "testco-beta"], ["price"])
+        await list_capabilities(conn, "video")
         with pytest.raises(psycopg.errors.ReadOnlySqlTransaction):
             await conn.execute("delete from models")

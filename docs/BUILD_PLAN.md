@@ -1,6 +1,6 @@
 # Build plan
 
-Do these in order. Each step lists what to build and the acceptance checks. Do not start a step
+If the build is already underway, apply `docs/CHANGE_REQUEST_001.md` first. Then do these in order. Each step lists what to build and the acceptance checks. Do not start a step
 until the previous one passes its checks. Commit after each step.
 
 ## Step 0: Project setup
@@ -27,27 +27,32 @@ until the previous one passes its checks. Commit after each step.
 - Add fixture data with **fictional** models and capabilities only.
 - **Accept:** tests prove: profile created on sign-up; `consume_message` allows exactly
   `message_limit` calls then blocks (including under concurrent calls); verified fact without a date is
-  rejected; users cannot read other users' conversations.
+  rejected; users cannot read other users' conversations; an unknown capability name, a wrong value
+  format (for example "Hindi" where `hi` is required) and a wrong type are rejected by the vocabulary
+  rules; the vocabulary is readable but not writable by a signed-in client.
 
 ## Step 2: Catalog module (`catalog/`)
 
 Implement, with typed pydantic models and parameterized SQL:
 
-- `search_models(modality, required_capabilities, limit)`
+- `search_models(modality, requirements, limit)`: forgiving, not exact-match (free-text terms resolved
+  through aliases and trigram similarity; closest matches returned; see `docs/AGENT_SPEC.md`)
+- `list_capabilities(modality)`
 - `get_model(slug)`
 - `compare_models(slugs, capability_names)`
 
 Details are in `docs/AGENT_SPEC.md` ("Tool contracts"). Key behaviours: every fact is returned with
-its source and verification status; requested capabilities with no row appear under `not_recorded`;
-`search_models` also reports candidates whose capability is unrecorded, so the agent never silently
-drops them.
+its source and verification status (price and API availability are facts like any other); requested
+capabilities with no row appear under `not_recorded` and count as "can't tell", never "no"; `search_models`
+reports how it read each term, lists unrecognised terms instead of dropping them, and returns full, close
+and partial matches so it is never empty when the modality has models.
 
 - **Accept:** unit and database tests cover match, no match, unrecorded capability, unverified versus
   verified, 2 to 3 model comparison, invalid slug, and SQL-injection-style inputs (treated as data).
 
 ## Step 3: MCP server (`mcp_server/`)
 
-- Expose the three tools using the official MCP Python SDK, wrapping `catalog/`. Clear tool descriptions
+- Expose the four tools using the official MCP Python SDK, wrapping `catalog/`. Clear tool descriptions
   (the model reads them). Support streamable HTTP and stdio.
 - **Accept:** a test or script connects with an MCP client, lists the tools, and calls each one
   against fixture data.
@@ -58,6 +63,8 @@ drops them.
   an interface so it can be faked in tests and swapped later.
 - Tool loop with `MAX_TOOL_CALLS_PER_TURN` and `MAX_OUTPUT_TOKENS`.
 - System prompt and the internal `save_context` tool exactly as in `docs/AGENT_SPEC.md`.
+- Flat tool schemas for Bedrock (no `$ref`, `$defs`, `anyOf`, `oneOf` or recursion), with a test that fails if
+  any appears.
 - Conversation storage: create or resume a conversation, apply the 24-hour expiry rule, store messages
   with token counts, update `last_activity_at`.
 - Call `consume_message` once per user message, before the model call.
@@ -88,6 +95,8 @@ developer can build against it before Bedrock is connected.
 
 - `Dockerfile` (or Railway config), start command, health check, environment variable list.
 - Document deployment to Railway and the environment variables in `README.md`.
+- Only the agent service is public. The MCP server is not exposed (`MCP_PUBLIC=false`). If it is exposed
+  later it must require a bearer API key (`MCP_API_KEY`), with a test that rejects unauthenticated requests.
 - Add structured logging (no message content or secrets in logs at info level) and basic request IDs.
 - **Accept:** container builds and passes the health check locally.
 
@@ -110,3 +119,4 @@ developer can build against it before Bedrock is connected.
 - Whether to count a user message if the model call fails after tool calls have already run.
 - Which Bedrock model to start with, once step 8 gives evidence.
 - Final free-tier limit (default 4).
+- Similarity threshold and tie rules for approximate matching (start at 0.4, tune against the test set).

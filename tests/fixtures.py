@@ -53,6 +53,39 @@ def _cap(conn, model_id, name, value, source_id, verified: bool) -> None:
     )  # fmt: skip
 
 
+def _source(conn: Connection, source_type: str, url: str, title: str) -> uuid.UUID:
+    row = conn.execute(
+        "insert into sources (source_type, url, title) values (%s, %s, %s) returning id",
+        (source_type, url, title),
+    ).fetchone()
+    return row[0]
+
+
+def _model(conn: Connection, **f) -> uuid.UUID:
+    row = conn.execute(
+        """insert into models (provider, name, slug, modality, description)
+           values (%(provider)s, %(name)s, %(slug)s, %(modality)s, %(description)s)
+           returning id""",
+        {
+            "provider": f.get("provider", "TestCo"),
+            "name": f["name"],
+            "slug": f["slug"],
+            "modality": f["modality"],
+            "description": f.get("description"),
+        },
+    ).fetchone()
+    return row[0]
+
+
+def _cap(conn, model_id, name, value, source_id, verified: bool) -> None:
+    conn.execute(
+        """insert into capabilities (model_id, name, value, source_id, verification_status, last_verified_at)
+           values (%s, %s, %s, %s, %s, %s)""",
+        (model_id, name, Jsonb(value), source_id, "verified" if verified else "unverified",
+         VERIFIED_AT if verified else None),
+    )  # fmt: skip
+
+
 # Test-only vocabulary. The migration defines only pricing and api_available; the real
 # vocabulary is the data team's to add.
 TEST_DEFINITIONS = [
@@ -74,30 +107,39 @@ def define_test_capabilities(conn: Connection) -> None:
 
 
 def seed_catalog(conn: Connection) -> None:
-    define_test_capabilities(conn)
+    """Fictional models over the draft vocabulary (supabase/seed/vocabulary_draft.sql)."""
     docs = _source(conn, "official_docs", "https://docs.testco.example/models", "TestCo model docs")
-    scraped = _source(conn, "scraped", "https://blog.example.test/review", "Third-party review")
+    scraped = _source(conn, "scraped", "https://blog.example.test/review", INJECTION_TEXT)
 
     alpha = _model(
         conn, name="TestModel Alpha", slug="testco-alpha", modality="video",
         description="Fictional video model used in tests.",
     )  # fmt: skip
-    _cap(conn, alpha, "pricing", {"currency": "USD", "unit": "second of video", "amount": 0.5}, docs, verified=True)
-    _cap(conn, alpha, "api_available", True, docs, verified=True)
-    _cap(conn, alpha, "output_languages", ["hi", "en"], docs, verified=True)
+    _cap(conn, alpha, "speech_languages", ["hi", "en"], docs, verified=True)
     _cap(conn, alpha, "audio_generation", True, docs, verified=True)
+    _cap(conn, alpha, "background_audio", True, scraped, verified=False)
     _cap(conn, alpha, "max_resolution", "1080p", scraped, verified=False)
+    _cap(conn, alpha, "max_clip_seconds", 10, docs, verified=True)
+    _cap(conn, alpha, "pricing", {"unit": "per_second", "amount": 0.5, "currency": "USD"}, docs, verified=True)
+    _cap(conn, alpha, "api_available", True, docs, verified=True)
 
     beta = _model(conn, name="TestModel Beta", slug="testco-beta", modality="video")
-    _cap(conn, beta, "api_available", False, docs, verified=True)
-    _cap(conn, beta, "output_languages", ["en"], docs, verified=True)
+    _cap(conn, beta, "speech_languages", ["en"], docs, verified=True)
     _cap(conn, beta, "audio_generation", True, scraped, verified=False)
+    _cap(conn, beta, "background_audio", False, docs, verified=True)
+    _cap(conn, beta, "max_resolution", "2160p", docs, verified=True)
+    _cap(conn, beta, "max_clip_seconds", 20, docs, verified=True)
+    _cap(conn, beta, "api_available", False, docs, verified=True)
 
-    # Gamma has no output_languages row at all: "not recorded".
+    # Gamma has no speech_languages, background_audio or clip length rows: "not recorded".
     gamma = _model(conn, name="TestModel Gamma", slug="testco-gamma", modality="video")
     _cap(conn, gamma, "audio_generation", True, scraped, verified=False)
+    _cap(conn, gamma, "max_resolution", "720p", docs, verified=True)
 
-    # Text model whose catalog text carries a planted instruction (prompt-injection fixture).
+    # Epsilon has no facts at all.
+    _model(conn, name="TestModel Epsilon", slug="testco-epsilon", modality="video")
+
+    # Text model whose display text carries a planted instruction (prompt-injection fixture).
     delta = _model(conn, name="TestModel Delta", slug="testco-delta", modality="text", description=INJECTION_TEXT)
-    _cap(conn, delta, "context_window", 100000, docs, verified=True)
-    _cap(conn, delta, "notes", INJECTION_TEXT, scraped, verified=False)
+    _cap(conn, delta, "context_window_tokens", 100000, docs, verified=True)
+    _cap(conn, delta, "output_languages", ["en", "hi"], scraped, verified=False)

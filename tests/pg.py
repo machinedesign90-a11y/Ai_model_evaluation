@@ -25,6 +25,7 @@ from psycopg import sql
 ROOT = Path(__file__).resolve().parent.parent
 MIGRATIONS = sorted((ROOT / "supabase" / "migrations").glob("*.sql"))
 AUTH_STUB = Path(__file__).resolve().parent / "sql" / "auth_stub.sql"
+SEED_VOCABULARY = ROOT / "supabase" / "seed" / "vocabulary_draft.sql"
 
 
 def _find_bindir() -> Path | None:
@@ -93,7 +94,7 @@ def dsn_for(admin_dsn: str, dbname: str) -> str:
 
 
 def build_template(admin_dsn: str) -> str:
-    """Create a database with the auth stub and every migration applied; return its name."""
+    """Create a database with the auth stub, every migration and the draft vocabulary seed; return its name."""
     name = f"md_template_{uuid.uuid4().hex[:8]}"
     with psycopg.connect(admin_dsn, autocommit=True) as conn:
         for role in ("anon", "authenticated"):
@@ -105,6 +106,7 @@ def build_template(admin_dsn: str) -> str:
         conn.execute(AUTH_STUB.read_text())
         for path in MIGRATIONS:
             conn.execute(path.read_text())
+        conn.execute(SEED_VOCABULARY.read_text())
     return name
 
 

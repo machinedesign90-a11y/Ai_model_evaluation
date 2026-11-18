@@ -30,6 +30,7 @@ SPECS = [t["toolSpec"] for t in tool_config()["tools"]]
 
 @pytest.mark.parametrize("spec", SPECS, ids=lambda s: s["name"])
 def test_schema_is_flat(spec):
+    """No $ref, $defs, combinators or recursion: Bedrock may reject them (checked for real in step 6)."""
     schema = spec["inputSchema"]["json"]
     bad = [(p, k) for p, k in walk(schema) if k in FORBIDDEN_KEYS]
     assert bad == [], f"{spec['name']}: references or combinators found at {bad}"
@@ -41,7 +42,7 @@ def test_schema_is_flat(spec):
 
 def test_tool_config_shape():
     names = [s["name"] for s in SPECS]
-    assert names == ["search_models", "get_model", "compare_models", "save_context"]
+    assert names == ["search_models", "list_capabilities", "get_model", "compare_models", "save_context"]
     for s in SPECS:
         assert s["description"].strip() and set(s) == {"name", "description", "inputSchema"}
 
@@ -55,14 +56,22 @@ def test_schema_properties_match_catalog_parameters(name):
 VALID = {
     "search_models": [
         {},
-        {"modality": "video", "required_capabilities": [{"name": "output_languages", "value": "hi"}], "limit": 5},
-        {"required_capabilities": [{"name": "api_available", "value": True}, {"name": "context_window", "value": 8}]},
+        {"modality": "video", "requirements": [{"capability": "Hindi voiceover"}], "limit": 5},
+        {"requirements": [{"capability": "resolution", "value": "4K", "operator": "at_least", "importance": "nice"}]},
+        {"requirements": [{"capability": "api", "value": True}, {"capability": "clip length", "value": 15}]},
     ],
-    "get_model": [{"slug": "testco-alpha"}],
-    "compare_models": [{"slugs": ["a", "b"]}, {"slugs": ["a", "b", "c"], "capability_names": ["pricing"]}],
+    "list_capabilities": [{}, {"modality": "video"}],
+    "get_model": [{"slug": "testco-alpha"}, {"slug": "TestModel Alpha"}],
+    "compare_models": [{"slugs": ["a", "b"]}, {"slugs": ["a", "b", "c"], "capability_names": ["price"]}],
 }
 INVALID = {
-    "search_models": [{"required_capabilities": [{"name": "x"}]}, {"limit": 0}, {"limit": 26}],
+    "search_models": [
+        {"requirements": [{"value": "x"}]},
+        {"requirements": [{"capability": "x", "operator": "near"}]},
+        {"requirements": [{"capability": "x", "importance": "maybe"}]},
+        {"limit": 0},
+        {"limit": 26},
+    ],
     "get_model": [{}],
     "compare_models": [{"slugs": ["a"]}, {"slugs": ["a", "b", "c", "d"]}],
 }
@@ -83,3 +92,20 @@ def test_invalid_inputs_rejected_by_schema(name, args):
 async def test_catalog_still_rejects_what_the_schema_rejects(aconn):
     with pytest.raises(CatalogInputError):
         await catalog.compare_models(aconn, ["a"])
+
+
+def test_save_context_is_not_a_catalog_or_mcp_tool():
+    assert "save_context" not in CATALOG_TOOLS
+
+
+def test_system_prompt_matches_the_spec():
+    import re
+    from pathlib import Path
+
+    from agent.prompts import system_prompt
+
+    spec = (Path(__file__).resolve().parent.parent / "docs" / "AGENT_SPEC.md").read_text()
+    block = re.search(r"```\n(.*?)```", spec[spec.index("## System prompt") :], re.S).group(1)
+    prompt = system_prompt()
+    assert prompt == block
+    assert "not recorded" in prompt and "can't tell" in prompt and "how you read them" in prompt

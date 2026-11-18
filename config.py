@@ -4,10 +4,12 @@ Required values have no default, so a missing one fails at startup with a clear
 pydantic error instead of failing later on first use.
 """
 
+from __future__ import annotations
+
 from functools import lru_cache
 
 from psycopg.conninfo import conninfo_to_dict
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -38,8 +40,18 @@ class Settings(BaseSettings):
     cors_origins: str = "http://localhost:3000"
     mock_agent: bool = False
 
-    # MCP server
+    # MCP server. Phase one: not public (loopback only, no key). If MCP_PUBLIC is ever true, every HTTP
+    # request must carry MCP_API_KEY as a bearer token.
     mcp_server_url: str = "http://localhost:8001/mcp"
+    mcp_public: bool = False
+    mcp_api_key: SecretStr | None = None
+
+    @model_validator(mode="after")
+    def _public_mcp_needs_key(self) -> Settings:
+        key = self.mcp_api_key.get_secret_value() if self.mcp_api_key else ""
+        if self.mcp_public and len(key) < 32:
+            raise ValueError("MCP_PUBLIC=true requires MCP_API_KEY of at least 32 characters")
+        return self
 
     @field_validator("database_url")
     @classmethod

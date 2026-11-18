@@ -9,9 +9,12 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, StringConstraints,
 
 SourceType = Literal["official_docs", "provider_api", "scraped", "manual_review"]
 VerificationStatus = Literal["verified", "unverified"]
+Operator = Literal["contains", "equals", "at_least", "at_most"]
+Importance = Literal["must", "nice"]
+Confidence = Literal["exact", "alias", "approximate"]
 
-Slug = Annotated[str, StringConstraints(strip_whitespace=True, to_lower=True, min_length=1, max_length=200)]
-CapabilityName = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)]
+Term = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
+Scalar = str | int | float | bool
 
 MAX_SEARCH_LIMIT = 25
 MAX_REQUIREMENTS = 10
@@ -40,28 +43,30 @@ class ModelSummary(_Out):
     modality: str
 
 
+class Unresolved(_Out):
+    """A word the tool could not map to the catalog's terms. Ask the user or call list_capabilities."""
+
+    requirement: int | None = Field(description="Index into the requirements, or null for modality/model names.")
+    term: str
+    part: Literal["capability", "value", "operator", "modality", "model"]
+    reason: str
+    suggestions: list[str]
+
+
 # --- search_models -----------------------------------------------------------------------------
 
 
-class CapabilityRequirement(BaseModel):
-    name: CapabilityName = Field(description="Capability name, e.g. 'output_languages' or 'audio_generation'.")
-    value: JsonValue = Field(
-        description=(
-            'Required value, matched by JSON containment: "hi" matches a recorded ["hi", "en"], '
-            'true matches true, {"a": 1} matches {"a": 1, "b": 2}.'
-        )
-    )
+class Requirement(BaseModel):
+    capability: Term
+    value: Scalar | None = None
+    operator: Operator | None = None
+    importance: Importance = "must"
 
 
 class SearchInput(BaseModel):
-    modality: Annotated[str, StringConstraints(strip_whitespace=True, to_lower=True, max_length=50)] | None = None
-    required_capabilities: list[CapabilityRequirement] = Field(default_factory=list, max_length=MAX_REQUIREMENTS)
+    modality: Annotated[str, StringConstraints(strip_whitespace=True, max_length=50)] | None = None
+    requirements: list[Requirement] = Field(default_factory=list, max_length=MAX_REQUIREMENTS)
     limit: int = 10
-
-    @field_validator("modality")
-    @classmethod
-    def _empty_modality_is_none(cls, v: str | None) -> str | None:
-        return v or None
 
     @field_validator("limit")
     @classmethod
@@ -69,29 +74,74 @@ class SearchInput(BaseModel):
         return max(1, min(v, MAX_SEARCH_LIMIT))
 
 
-class SearchMatch(ModelSummary):
-    facts: list[Fact] = Field(description="The recorded facts that satisfy the requirements.")
+class Interpretation(_Out):
+    requirement: int
+    input_capability: str
+    input_value: Scalar | None
+    status: Literal["resolved", "ambiguous", "unresolved"]
+    capability: str | None
+    capability_label: str | None
+    operator: Operator | None
+    value: JsonValue | None = Field(description="Canonical value; null means any recorded value counts.")
+    importance: Importance
+    confidence: Confidence | None = Field(description="Weakest of the capability and value readings.")
+    note: str = Field(description="How the words were read, in one line, for telling the user.")
 
 
-class UnconfirmedCandidate(ModelSummary):
-    facts: list[Fact] = Field(description="Requirements this model does satisfy.")
-    missing_capabilities: list[str] = Field(description="Required capabilities with no recorded fact: not recorded.")
+class RequirementResult(_Out):
+    requirement: int
+    capability: str
+    status: Literal["satisfied", "not_satisfied", "not_recorded"]
+    fact: Fact | None = Field(description="The recorded fact the status is based on; null when not recorded.")
+
+
+class ModelMatch(ModelSummary):
+    results: list[RequirementResult]
+    met: list[str]
+    missed: list[str]
+    not_recorded: list[str] = Field(description="Can't tell: no fact recorded. Never report these as a 'no'.")
 
 
 class SearchResult(_Out):
     searched_modality: str | None
+    modality_note: str | None
     total_models_in_modality: int
-    matches: list[SearchMatch]
-    total_matches: int
-    unconfirmed: list[UnconfirmedCandidate]
-    total_unconfirmed: int
-    unknown_capability_names: list[str] = Field(
-        description="Requested names that are not defined capabilities; the catalog uses different names."
+    models_with_any_recorded_fact: int
+    interpretation: list[Interpretation]
+    unresolved: list[Unresolved]
+    full_matches: list[ModelMatch] = Field(description="Every 'must' requirement satisfied.")
+    close_matches: list[ModelMatch] = Field(
+        description="No 'must' requirement contradicted, but at least one is not recorded: can't be ruled out."
     )
-    known_capability_names: list[str] = Field(
-        description="Every defined capability name; filled only when some requested name is unknown."
+    partial_matches: list[ModelMatch] = Field(
+        description="At least one 'must' requirement not satisfied; ranked by what they do meet."
     )
-    available_modalities: list[str]
+    total_full_matches: int
+    total_close_matches: int
+    total_partial_matches: int
+    other_models: list[ModelSummary] = Field(
+        description="Only when no requirement could be read: models in the modality, so the answer is never empty."
+    )
+
+
+# --- list_capabilities -------------------------------------------------------------------------
+
+
+class CapabilityInfo(_Out):
+    name: str
+    label: str
+    description: str
+    value_type: Literal["boolean", "number", "text", "enum", "enum_list", "json"]
+    unit: str | None
+    allowed_values: JsonValue | None
+    modalities: list[str] = Field(description="Empty means it applies to every modality.")
+    example_aliases: list[str]
+
+
+class ListCapabilitiesResult(_Out):
+    modality: str | None
+    modality_note: str | None
+    capabilities: list[CapabilityInfo]
 
 
 # --- get_model ---------------------------------------------------------------------------------
@@ -108,37 +158,42 @@ class ModelDetail(ModelSummary):
 
 class GetModelResult(_Out):
     status: Literal["found", "not_found"]
+    requested: str
+    matched_by: Literal["slug", "name", "approximate"] | None = None
     model: ModelDetail | None = None
-    requested_slug: str
-    suggestions: list[ModelSummary] = Field(default_factory=list)
+    suggestions: list[str] = Field(default_factory=list, description="Close model slugs when not found.")
 
 
 # --- compare_models ----------------------------------------------------------------------------
 
 
 class CompareInput(BaseModel):
-    slugs: list[Slug] = Field(min_length=2, max_length=3)
-    capability_names: list[CapabilityName] | None = Field(default=None, max_length=MAX_COMPARE_CAPABILITIES)
+    slugs: list[Term] = Field(min_length=2, max_length=3, description="Slugs or names.")
+    capability_names: list[Term] | None = Field(default=None, max_length=MAX_COMPARE_CAPABILITIES)
 
     @field_validator("slugs")
     @classmethod
     def _distinct(cls, v: list[str]) -> list[str]:
-        if len(set(v)) != len(v):
+        if len({s.lower() for s in v}) != len(v):
             raise ValueError("slugs must be distinct")
         return v
 
 
 class ComparedModel(ModelSummary):
+    requested: str
+    matched_by: Literal["slug", "name", "approximate"]
     facts: list[Fact]
     not_recorded: list[str]
 
 
-class NotFound(_Out):
-    slug: str
-    suggestions: list[ModelSummary]
+class CapabilityReading(_Out):
+    input: str
+    capability: str
+    confidence: Confidence
 
 
 class CompareResult(_Out):
     capability_names: list[str]
+    capability_interpretation: list[CapabilityReading]
     models: list[ComparedModel]
-    not_found: list[NotFound]
+    unresolved: list[Unresolved]

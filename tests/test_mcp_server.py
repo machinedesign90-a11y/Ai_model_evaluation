@@ -1,28 +1,32 @@
-"""Step 3: an MCP client lists and calls each tool against the fixture catalog.
+"""MCP server: an MCP client lists and calls each tool against the fixture catalog.
 
-In-process for the detailed checks, plus the real stdio and streamable HTTP transports.
+In-process for the detailed checks, plus the real stdio and streamable HTTP transports,
+and the MCP_PUBLIC / MCP_API_KEY gate.
 """
 
 from __future__ import annotations
 
-import json
 import os
 import socket
 import subprocess
 import sys
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 
+import httpx2
 import psycopg
 import pytest
 from mcp import Client
 from mcp.client.stdio import StdioServerParameters
+from mcp.client.streamable_http import streamable_http_client
+from mcp.shared._httpx_utils import create_mcp_http_client
 
 from mcp_server.server import create_server
 
 ROOT = Path(__file__).resolve().parent.parent
-TOOLS = {"search_models", "get_model", "compare_models"}
+TOOLS = {"search_models", "list_capabilities", "get_model", "compare_models"}
+API_KEY = "k" * 40
 
 
 def payload(result):
@@ -42,10 +46,10 @@ def server(catalog_dsn):
     return create_server(connection=connect)
 
 
-async def test_lists_the_three_read_only_tools(server):
+async def test_lists_the_four_read_only_tools(server):
     async with Client(server) as client:
         tools = {t.name: t for t in (await client.list_tools()).tools}
-    assert set(tools) == TOOLS
+    assert set(tools) == TOOLS  # save_context stays internal to the agent
     for t in tools.values():
         assert t.description and t.output_schema
         assert t.annotations.read_only_hint is True
@@ -55,20 +59,26 @@ async def test_calls_each_tool(server):
     async with Client(server) as client:
         s = payload(
             await client.call_tool(
-                "search_models",
-                {"modality": "video", "required_capabilities": [{"name": "output_languages", "value": "hi"}]},
+                "search_models", {"modality": "video", "requirements": [{"capability": "Hindi voiceover"}]}
             )
         )
-        assert [m["slug"] for m in s["matches"]] == ["testco-alpha"]
-        assert s["matches"][0]["facts"][0]["verification_status"] == "verified"
-        assert [m["missing_capabilities"] for m in s["unconfirmed"]] == [["output_languages"]]
+        assert [m["slug"] for m in s["full_matches"]] == ["testco-alpha"]
+        assert s["interpretation"][0]["capability"] == "speech_languages"
+        assert {m["slug"] for m in s["close_matches"]} == {"testco-gamma", "testco-epsilon"}
 
-        g = payload(await client.call_tool("get_model", {"slug": "testco-beta"}))
-        assert g["status"] == "found"
+        caps = payload(await client.call_tool("list_capabilities", {"modality": "video"}))
+        assert "speech_languages" in {c["name"] for c in caps["capabilities"]}
+
+        g = payload(await client.call_tool("get_model", {"slug": "TestModel Beta"}))
+        assert g["status"] == "found" and g["matched_by"] == "name"
         assert {f["name"]: f["value"] for f in g["model"]["facts"]}["api_available"] is False
 
-        c = payload(await client.call_tool("compare_models", {"slugs": ["testco-alpha", "testco-gamma"]}))
-        assert c["models"][1]["not_recorded"] == ["api_available", "max_resolution", "output_languages", "pricing"]
+        c = payload(
+            await client.call_tool(
+                "compare_models", {"slugs": ["testco-alpha", "testco-gamma"], "capability_names": ["price"]}
+            )
+        )
+        assert c["models"][1]["not_recorded"] == ["pricing"]
 
 
 async def test_invalid_arguments_return_a_tool_error(server):
@@ -78,8 +88,10 @@ async def test_invalid_arguments_return_a_tool_error(server):
     assert "slugs" in r.content[0].text
 
 
-def _env(dsn):
-    return {**os.environ, "DATABASE_URL": dsn, "PYTHONPATH": str(ROOT)}
+def _env(dsn, **extra):
+    env = {**os.environ, "DATABASE_URL": dsn, "PYTHONPATH": str(ROOT), "MCP_PUBLIC": "false"}
+    env.pop("MCP_API_KEY", None)
+    return {**env, **extra}
 
 
 async def test_stdio_transport(catalog_dsn):
@@ -101,41 +113,84 @@ def _free_port():
         return s.getsockname()[1]
 
 
-@pytest.fixture
-def http_server(catalog_dsn):
+@contextmanager
+def run_http(env):
     port = _free_port()
     proc = subprocess.Popen(
         [sys.executable, "-m", "mcp_server", "--transport", "http", "--host", "127.0.0.1", "--port", str(port)],
-        env=_env(catalog_dsn),
+        env=env,
         cwd=ROOT,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
     )
-    deadline = time.monotonic() + 20
-    while time.monotonic() < deadline:
-        with socket.socket() as s:
-            if s.connect_ex(("127.0.0.1", port)) == 0:
-                break
-        if proc.poll() is not None:
-            raise RuntimeError(proc.stderr.read().decode())
-        time.sleep(0.1)
-    yield f"http://127.0.0.1:{port}/mcp"
-    proc.terminate()
-    proc.wait(timeout=10)
+    try:
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            with socket.socket() as s:
+                if s.connect_ex(("127.0.0.1", port)) == 0:
+                    break
+            if proc.poll() is not None:
+                raise RuntimeError(proc.stderr.read().decode())
+            time.sleep(0.1)
+        yield f"http://127.0.0.1:{port}/mcp"
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
 
 
-async def test_streamable_http_transport(http_server):
-    async with Client(http_server) as client:
-        assert {t.name for t in (await client.list_tools()).tools} == TOOLS
-        c = payload(
-            await client.call_tool("compare_models", {"slugs": ["testco-alpha", "testco-beta", "testco-gamma"]})
-        )
+async def test_streamable_http_transport(catalog_dsn):
+    with run_http(_env(catalog_dsn)) as url:
+        async with Client(url) as client:
+            assert {t.name for t in (await client.list_tools()).tools} == TOOLS
+            c = payload(
+                await client.call_tool("compare_models", {"slugs": ["testco-alpha", "testco-beta", "testco-gamma"]})
+            )
     assert [m["slug"] for m in c["models"]] == ["testco-alpha", "testco-beta", "testco-gamma"]
-    json.dumps(c)  # plain JSON all the way through
+
+
+# --- MCP_PUBLIC / MCP_API_KEY ------------------------------------------------------------------
+
+
+INIT = {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "initialize",
+    "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "1"}},
+}
+HEADERS = {"accept": "application/json, text/event-stream", "content-type": "application/json"}
+
+
+@pytest.mark.parametrize("auth", [None, "Bearer wrong-key-wrong-key-wrong-key-wrong", f"Basic {API_KEY}", "Bearer"])
+async def test_public_http_rejects_requests_without_the_key(catalog_dsn, auth):
+    with run_http(_env(catalog_dsn, MCP_PUBLIC="true", MCP_API_KEY=API_KEY)) as url:
+        headers = HEADERS | ({"authorization": auth} if auth else {})
+        async with httpx2.AsyncClient() as http:
+            r = await http.post(url, json=INIT, headers=headers)
+    assert r.status_code == 401
+    assert r.json()["error"]["code"] == "unauthorized" and API_KEY not in r.text
+
+
+async def test_public_http_accepts_the_key(catalog_dsn):
+    with run_http(_env(catalog_dsn, MCP_PUBLIC="true", MCP_API_KEY=API_KEY)) as url:
+        http = create_mcp_http_client(headers={"authorization": f"Bearer {API_KEY}"})
+        async with Client(streamable_http_client(url, http_client=http)) as client:
+            assert {t.name for t in (await client.list_tools()).tools} == TOOLS
+
+
+def test_public_without_a_key_refuses_to_start(catalog_dsn):
+    proc = subprocess.run(
+        [sys.executable, "-m", "mcp_server", "--transport", "http", "--host", "0.0.0.0", "--port", "1"],
+        env=_env(catalog_dsn, MCP_PUBLIC="true"),
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert proc.returncode != 0 and "MCP_API_KEY" in proc.stderr
 
 
 @pytest.mark.parametrize("host", ["0.0.0.0", "::", "10.0.0.5", "example.com"])
-def test_http_refuses_non_loopback_hosts(catalog_dsn, host):
+def test_private_http_refuses_non_loopback_hosts(catalog_dsn, host):
     proc = subprocess.run(
         [sys.executable, "-m", "mcp_server", "--transport", "http", "--host", host, "--port", "1"],
         env=_env(catalog_dsn),
@@ -144,7 +199,7 @@ def test_http_refuses_non_loopback_hosts(catalog_dsn, host):
         text=True,
         timeout=30,
     )
-    assert proc.returncode != 0 and "no authentication" in proc.stderr
+    assert proc.returncode != 0 and "MCP_PUBLIC is false" in proc.stderr
 
 
 def test_loopback_hosts_allowed():
