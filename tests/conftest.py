@@ -47,3 +47,10 @@ def catalog_dsn(db_dsn: str, db: psycopg.Connection) -> str:
     """A fresh database with the fictional catalog loaded."""
     seed_catalog(db)
     return db_dsn
+
+
+@pytest.fixture
+async def aconn(catalog_dsn: str):
+    """Async connection to a database holding the fictional catalog."""
+    async with await psycopg.AsyncConnection.connect(catalog_dsn, autocommit=True) as conn:
+        yield conn
