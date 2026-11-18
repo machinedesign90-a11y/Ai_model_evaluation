@@ -64,10 +64,11 @@ async def test_calls_each_tool(server):
         assert [m["missing_capabilities"] for m in s["unconfirmed"]] == [["output_languages"]]
 
         g = payload(await client.call_tool("get_model", {"slug": "testco-beta"}))
-        assert g["status"] == "found" and g["model"]["api_available"] is False
+        assert g["status"] == "found"
+        assert {f["name"]: f["value"] for f in g["model"]["facts"]}["api_available"] is False
 
         c = payload(await client.call_tool("compare_models", {"slugs": ["testco-alpha", "testco-gamma"]}))
-        assert c["models"][1]["not_recorded"] == ["max_resolution", "output_languages"]
+        assert c["models"][1]["not_recorded"] == ["api_available", "max_resolution", "output_languages", "pricing"]
 
 
 async def test_invalid_arguments_return_a_tool_error(server):

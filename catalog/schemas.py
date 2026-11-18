@@ -86,10 +86,10 @@ class SearchResult(_Out):
     unconfirmed: list[UnconfirmedCandidate]
     total_unconfirmed: int
     unknown_capability_names: list[str] = Field(
-        description="Requested capability names that no model in the catalog has; probably a different name is used."
+        description="Requested names that are not defined capabilities; the catalog uses different names."
     )
     known_capability_names: list[str] = Field(
-        description="All capability names in the catalog; filled only when some requested name is unknown."
+        description="Every defined capability name; filled only when some requested name is unknown."
     )
     available_modalities: list[str]
 
@@ -98,10 +98,12 @@ class SearchResult(_Out):
 
 
 class ModelDetail(ModelSummary):
-    description: str | None
-    pricing: JsonValue | None = Field(description="null means pricing is not recorded")
-    api_available: bool | None = Field(description="null means not recorded")
-    facts: list[Fact]
+    display_description: str | None = Field(
+        description="Display text only, not a sourced fact. Never make claims from it."
+    )
+    facts: list[Fact] = Field(
+        description="Every recorded fact, including pricing and api_available. Anything absent is not recorded."
+    )
 
 
 class GetModelResult(_Out):

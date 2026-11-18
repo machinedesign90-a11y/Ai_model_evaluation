@@ -95,7 +95,7 @@ def test_verified_fact_without_date_rejected(db):
     with pytest.raises(errors.CheckViolation):
         db.execute(
             "insert into capabilities (model_id, name, value, verification_status)"
-            " values (%s, 'a', 'true', 'verified')",
+            " values (%s, 'api_available', 'true', 'verified')",
             (mid,),
         )
 
@@ -104,10 +104,14 @@ def test_verified_fact_with_date_and_unverified_without_date_accepted(db):
     mid = _model(db)
     db.execute(
         "insert into capabilities (model_id, name, value, verification_status, last_verified_at)"
-        " values (%s, 'a', 'true', 'verified', %s)",
+        " values (%s, 'api_available', 'true', 'verified', %s)",
         (mid, VERIFIED_AT),
     )
-    db.execute("insert into capabilities (model_id, name, value) values (%s, 'b', 'true')", (mid,))
+    mid2 = db.execute(
+        "insert into models (provider, name, slug, modality) values ('TestCo', 'TestModel Y', 'testco-y', 'video')"
+        " returning id"
+    ).fetchone()[0]
+    db.execute("insert into capabilities (model_id, name, value) values (%s, 'api_available', 'true')", (mid2,))
     assert db.execute("select count(*) from capabilities").fetchone()[0] == 2
 
 

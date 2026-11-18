@@ -135,7 +135,7 @@ async def search_models(
     matches.sort(key=verified)
     unconfirmed.sort(key=lambda item: (len(item.missing_capabilities), verified(item)))
 
-    names = [r["name"] for r in await _fetch(conn, "select distinct name from capabilities order by name")]
+    names = [r["name"] for r in await _fetch(conn, "select name from capability_definitions order by name")]
     unknown = sorted({r.name for r in reqs} - set(names))
     modalities = [r["modality"] for r in await _fetch(conn, "select distinct modality from models order by 1")]
 
@@ -197,11 +197,12 @@ async def _facts_for(conn: AsyncConnection, model_ids: list[Any], names: list[st
 
 
 async def get_model(conn: AsyncConnection, slug: str) -> GetModelResult:
-    """One model with every recorded fact and its provenance, or not_found with suggestions."""
+    """One model with every recorded fact (pricing and api_available included) and its provenance,
+    or not_found with suggestions. The description is display text, not a fact."""
     clean = _validate(_SlugInput, slug=slug).slug
     rows = await _fetch(
         conn,
-        """select id, slug, name, provider, modality, description, pricing, api_available
+        """select id, slug, name, provider, modality, description
            from models where slug = %(slug)s""",
         {"slug": clean},
     )
@@ -209,13 +210,7 @@ async def get_model(conn: AsyncConnection, slug: str) -> GetModelResult:
         return GetModelResult(status="not_found", requested_slug=clean, suggestions=await _suggest(conn, clean))
     m = rows[0]
     facts = (await _facts_for(conn, [m["id"]], None)).get(m["id"], [])
-    detail = ModelDetail(
-        **_summary(m),
-        description=m["description"],
-        pricing=m["pricing"] or None,  # {} is the column default: not recorded
-        api_available=m["api_available"],
-        facts=facts,
-    )
+    detail = ModelDetail(**_summary(m), display_description=m["description"], facts=facts)
     return GetModelResult(status="found", model=detail, requested_slug=clean)
 
 

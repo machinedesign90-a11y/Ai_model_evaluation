@@ -95,16 +95,22 @@ async def test_get_model_returns_all_facts_with_provenance(aconn):
     r = await get_model(aconn, "TestCo-Alpha ")
     assert r.status == "found"
     m = r.model
-    assert (m.name, m.provider, m.modality, m.api_available) == ("TestModel Alpha", "TestCo", "video", True)
-    assert m.pricing == {"unit": "second", "usd": 0.5}
-    assert [f.name for f in m.facts] == ["audio_generation", "max_resolution", "output_languages"]
+    assert (m.name, m.provider, m.modality) == ("TestModel Alpha", "TestCo", "video")
+    assert [f.name for f in m.facts] == [
+        "api_available", "audio_generation", "max_resolution", "output_languages", "pricing",
+    ]  # fmt: skip
+    facts = {f.name: f for f in m.facts}
+    assert facts["pricing"].value == {"currency": "USD", "unit": "second of video", "amount": 0.5}
+    assert facts["pricing"].verification_status == "verified" and facts["pricing"].source_type == "official_docs"
+    assert facts["api_available"].value is True
     res = next(f for f in m.facts if f.name == "max_resolution")
     assert res.verification_status == "unverified" and res.source_type == "scraped" and res.last_verified_at is None
 
 
-async def test_get_model_unrecorded_fields_are_null(aconn):
+async def test_get_model_unrecorded_pricing_and_api_are_simply_absent(aconn):
     m = (await get_model(aconn, "testco-gamma")).model
-    assert m.pricing is None and m.api_available is None and m.description is None
+    assert [f.name for f in m.facts] == ["audio_generation"]
+    assert m.display_description is None
 
 
 async def test_get_model_unknown_slug_suggests(aconn):
@@ -119,11 +125,11 @@ async def test_get_model_unknown_slug_suggests(aconn):
 
 async def test_compare_two_models_defaults_to_union_of_capabilities(aconn):
     r = await compare_models(aconn, ["testco-alpha", "testco-gamma"])
-    assert r.capability_names == ["audio_generation", "max_resolution", "output_languages"]
+    assert r.capability_names == ["api_available", "audio_generation", "max_resolution", "output_languages", "pricing"]
     alpha, gamma = r.models
     assert alpha.not_recorded == []
     assert [f.name for f in gamma.facts] == ["audio_generation"]
-    assert gamma.not_recorded == ["max_resolution", "output_languages"]
+    assert gamma.not_recorded == ["api_available", "max_resolution", "output_languages", "pricing"]
 
 
 async def test_compare_three_models_with_named_capabilities_keeps_order(aconn):
@@ -154,7 +160,7 @@ async def test_compare_needs_two_or_three_distinct_slugs(aconn, bad):
 
 async def test_catalog_text_is_returned_verbatim_as_data(aconn):
     m = (await get_model(aconn, "testco-delta")).model
-    assert m.description == INJECTION_TEXT
+    assert m.display_description == INJECTION_TEXT
     assert next(f for f in m.facts if f.name == "notes").value == INJECTION_TEXT
 
 
