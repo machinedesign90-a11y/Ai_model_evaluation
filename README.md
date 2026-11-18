@@ -22,15 +22,61 @@ Open this folder in Claude Code. It reads `CLAUDE.md` automatically; the ordered
 `docs/BUILD_PLAN.md`, the agent and tool spec in `docs/AGENT_SPEC.md`, and the chat endpoint contract
 (for the UI developer) in `docs/API_CONTRACT.md`.
 
-## Layout (planned)
+## Layout
 
 ```
-supabase/migrations/   SQL schema (done)
-mcp_server/            search_models, get_model, compare_models  (next)
-agent/                 Bedrock Converse loop, streaming chat endpoint, sessions
-tests/                 about twenty question and answer checks for the agent
+config.py              settings from the environment / .env (fails fast on missing DATABASE_URL)
+supabase/migrations/   SQL schema
+catalog/               shared catalog logic: search_models, get_model, compare_models
+mcp_server/            MCP server wrapping catalog/ (stdio and streamable HTTP)
+agent/                 Bedrock Converse loop, streaming chat endpoint, sessions   (step 4+, not built)
+tests/                 pytest: schema, catalog, MCP (real PostgreSQL, fictional fixture data)
+tests/eval/            question set for comparing Bedrock models                 (step 8, not built)
+scripts/               helper scripts
 .env.example           every setting; copy to .env
 ```
+
+## Development
+
+Requires Python 3.12+, [uv](https://docs.astral.sh/uv/) and PostgreSQL 16 binaries (`initdb`, `pg_ctl`) for tests.
+
+```bash
+uv sync
+```
+
+```bash
+uv run pytest
+```
+
+```bash
+uv run ruff check . && uv run ruff format --check .
+```
+
+Tests start a throwaway PostgreSQL cluster, apply a stub of Supabase's `auth` schema (including
+Supabase's default grants, so row-level security is what blocks clients) and every migration, then give
+each test a fresh database. To use an existing server instead, set `TEST_DATABASE_URL` to a superuser
+connection string; the tests create and drop their own databases there. When run as root the harness
+starts PostgreSQL as the `postgres` OS user.
+
+### MCP server
+
+Read-only tools over the catalog: `search_models`, `get_model`, `compare_models`. Its database
+connections run with `default_transaction_read_only=on`.
+
+```bash
+uv run python -m mcp_server --transport stdio
+```
+
+```bash
+uv run python -m mcp_server --transport http --port 8001
+```
+
+```bash
+uv run python scripts/mcp_smoke.py http://localhost:8001/mcp
+```
+
+Uses `mcp` SDK 2.x (`MCPServer`, formerly `FastMCP`). The HTTP endpoint has no authentication yet; see
+the deploy step before exposing it publicly.
 
 ## Database
 
@@ -64,8 +110,11 @@ rule, and row-level security (users see only their own profile and conversations
 cannot write the catalog, cannot call `consume_message`). Not yet run against a real
 Supabase project.
 
-## Next
+## Status
 
-1. MCP server with the three tools.
-2. Agent service with the Bedrock loop, streaming, sessions and the counter.
-3. Chat endpoint contract (with a mock response) for the UI developer.
+Done: steps 0 to 3 of `docs/BUILD_PLAN.md` (setup, database harness, catalog module, MCP server).
+
+Next:
+
+1. Agent service with the Bedrock loop, streaming, sessions and the counter (step 4).
+2. Chat endpoint contract with a mock mode for the UI developer (step 5).

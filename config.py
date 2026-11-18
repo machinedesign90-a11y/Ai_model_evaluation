@@ -6,12 +6,15 @@ pydantic error instead of failing later on first use.
 
 from functools import lru_cache
 
-from pydantic import Field, PostgresDsn, SecretStr
+from psycopg.conninfo import conninfo_to_dict
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=".env", env_file_encoding="utf-8", extra="ignore", hide_input_in_errors=True
+    )
 
     # Database
     database_url: SecretStr
@@ -38,9 +41,17 @@ class Settings(BaseSettings):
     # MCP server
     mcp_server_url: str = "http://localhost:8001/mcp"
 
+    @field_validator("database_url")
+    @classmethod
+    def _parseable_dsn(cls, v: SecretStr) -> SecretStr:
+        # URL or key=value form, as libpq accepts; the error never echoes the secret.
+        try:
+            conninfo_to_dict(v.get_secret_value())
+        except Exception:
+            raise ValueError("DATABASE_URL is not a valid PostgreSQL connection string") from None
+        return v
+
     def database_dsn(self) -> str:
-        # Validate the shape without keeping the secret in a non-Secret field.
-        PostgresDsn(self.database_url.get_secret_value())
         return self.database_url.get_secret_value()
 
     @property
