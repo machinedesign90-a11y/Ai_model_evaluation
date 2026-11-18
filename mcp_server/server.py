@@ -19,6 +19,7 @@ from psycopg_pool import AsyncConnectionPool
 from pydantic import Field
 
 import catalog
+from catalog import tool_docs
 from catalog.schemas import CapabilityRequirement, CompareResult, GetModelResult, SearchResult
 
 INSTRUCTIONS = """\
@@ -78,7 +79,7 @@ def create_server(dsn: str | None = None, *, connection: ConnectionSource | None
         except catalog.CatalogInputError as exc:
             raise ToolError(f"Invalid arguments: {exc}") from exc
 
-    @server.tool(annotations=READ_ONLY)
+    @server.tool(annotations=READ_ONLY, description=tool_docs.SEARCH_MODELS)
     async def search_models(
         modality: Annotated[
             str | None, Field(description="Output modality such as 'video', 'text', 'image', 'speech'. Omit for all.")
@@ -88,27 +89,15 @@ def create_server(dsn: str | None = None, *, connection: ConnectionSource | None
         ] = None,
         limit: Annotated[int, Field(description="Max matches and max unconfirmed returned (1 to 25).")] = 10,
     ) -> SearchResult:
-        """Find models whose recorded facts satisfy every required capability.
-
-        Returns `matches` (all requirements recorded and satisfied, with the facts and their sources) and
-        `unconfirmed` (no recorded fact contradicts the requirements, but some are NOT RECORDED; listed in
-        `missing_capabilities`). Report unconfirmed models as "not recorded for X", never as matches.
-        `total_models_in_modality` tells how much data exists. If `unknown_capability_names` is non-empty, the
-        name is not a defined capability (see `known_capability_names`): retry with a defined name before concluding.
-        """
         return await run(catalog.search_models, modality, required_capabilities, limit)
 
-    @server.tool(annotations=READ_ONLY)
+    @server.tool(annotations=READ_ONLY, description=tool_docs.GET_MODEL)
     async def get_model(
         slug: Annotated[str, Field(description="Model slug from a previous search, e.g. 'provider-model-name'.")],
     ) -> GetModelResult:
-        """Everything recorded about one model: every fact (including `pricing` and `api_available`) with its
-        source and verification status. A capability absent from `facts` is not recorded. `display_description`
-        is display text only: never make claims from it. An unknown slug returns status 'not_found' with
-        close-match suggestions."""
         return await run(catalog.get_model, slug)
 
-    @server.tool(annotations=READ_ONLY)
+    @server.tool(annotations=READ_ONLY, description=tool_docs.COMPARE_MODELS)
     async def compare_models(
         slugs: Annotated[list[str], Field(description="2 or 3 distinct model slugs.")],
         capability_names: Annotated[
@@ -116,8 +105,6 @@ def create_server(dsn: str | None = None, *, connection: ConnectionSource | None
             Field(description="Capabilities to compare. Omit to compare every capability any of them has."),
         ] = None,
     ) -> CompareResult:
-        """Side-by-side facts for 2 or 3 models. For each model, each requested capability is either a sourced
-        fact or listed in `not_recorded`. Unknown slugs are returned in `not_found` with suggestions."""
         return await run(catalog.compare_models, slugs, capability_names)
 
     return server
