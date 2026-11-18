@@ -1,51 +1,88 @@
 -- DRAFT starter vocabulary for the data team to confirm or change.
--- Contains names, value formats and everyday wording only. It makes no claim
--- about any real model. Safe to re-run (inserts skip existing rows).
--- Apply after the migrations:  psql "$DATABASE_URL" -f supabase/seed/vocabulary_draft.sql
+-- Contains names, value formats, measure or filter kinds and everyday wording only.
+-- It makes no claim about any real model.
+-- Safe to re-run: definitions are updated in place, aliases skip existing rows.
+-- Apply after all migrations:  psql "$DATABASE_URL" -f supabase/seed/vocabulary_draft.sql
 
-insert into capability_definitions (name, label, description, value_type, unit, allowed_values, modalities) values
+insert into capability_definitions
+  (name, label, description, value_type, unit, allowed_values, modalities, kind, operators, better) values
+  -- ---- filters: attributes you include or exclude ----
   ('speech_languages', 'Spoken languages',
    'Languages the model can speak in generated audio (voiceover, narration, dialogue). Two-letter ISO 639-1 codes.',
    'enum_list', null,
    '["en","hi","bn","ta","te","mr","gu","kn","ml","pa","ur","es","fr","de","pt","it","ja","ko","zh","ar","ru","id","tr"]',
-   '{video,speech}'),
+   '{video,speech}', 'filter', '{contains}', null),
   ('output_languages', 'Written output languages',
    'Languages the model can write or render as text. Two-letter ISO 639-1 codes.',
    'enum_list', null,
    '["en","hi","bn","ta","te","mr","gu","kn","ml","pa","ur","es","fr","de","pt","it","ja","ko","zh","ar","ru","id","tr"]',
-   '{}'),
+   '{}', 'filter', '{contains}', null),
   ('audio_generation', 'Generates audio',
    'True if the model produces audio (speech, music or sound) as part of its own output.',
-   'boolean', null, null, '{video}'),
+   'boolean', null, null, '{video}', 'filter', '{equals}', null),
   ('background_audio', 'Background audio',
    'True if the model generates music or ambient sound alongside speech.',
-   'boolean', null, null, '{video}'),
-  ('max_resolution', 'Maximum resolution',
-   'Highest output resolution offered.',
-   'enum', null, '["480p","720p","1080p","1440p","2160p"]', '{video,image}'),
-  ('max_clip_seconds', 'Maximum clip length',
-   'Longest single generated clip, in seconds.',
-   'number', 'seconds', null, '{video}'),
+   'boolean', null, null, '{video}', 'filter', '{equals}', null),
   ('api_available', 'API available',
    'True if the model can be used through a public API.',
-   'boolean', null, null, '{}'),
+   'boolean', null, null, '{}', 'filter', '{equals}', null),
   ('open_weights', 'Open weights',
-   'True if the model weights are publicly downloadable.',
-   'boolean', null, null, '{}'),
-  ('context_window_tokens', 'Context window',
-   'Maximum input context, in tokens.',
-   'number', 'tokens', null, '{text}'),
+   'True if the model weights are publicly downloadable (open). False for closed or proprietary models.',
+   'boolean', null, null, '{}', 'filter', '{equals}', null),
+  ('deprecated', 'Deprecated',
+   'True if the provider has deprecated or retired the model.',
+   'boolean', null, null, '{}', 'filter', '{equals}', null),
   ('input_modalities', 'Input types',
    'Kinds of input the model accepts.',
-   'enum_list', null, '["text","image","audio","video"]', '{}'),
+   'enum_list', null, '["text","image","audio","video"]', '{}', 'filter', '{contains}', null),
   ('output_modalities', 'Output types',
    'Kinds of output the model produces.',
-   'enum_list', null, '["text","image","audio","video"]', '{}'),
-  ('pricing', 'Pricing',
-   'Price as an object: {"unit": "...", "amount": number, "currency": "USD", "notes": "optional"}. unit is one of per_second, per_clip, per_image, per_1k_input_tokens, per_1k_output_tokens, per_month.',
-   'json', null, null, '{}')
-on conflict (name) do nothing;
+   'enum_list', null, '["text","image","audio","video"]', '{}', 'filter', '{contains}', null),
+  ('pricing_notes', 'Pricing notes',
+   'Plain-text notes that qualify a price (tiers, resolution-dependent rates, free allowances). Display only; comparisons use the numeric price measures.',
+   'text', null, null, '{}', 'filter', '{}', null),
 
+  -- ---- measures: quantities you compare, threshold or sort ----
+  ('max_resolution', 'Maximum video resolution',
+   'Highest video output resolution offered. The allowed list is in increasing order, so "at least 1080p" includes 1440p and 2160p.',
+   'enum', null, '["480p","720p","1080p","1440p","2160p"]',
+   '{video}', 'measure', '{equals,at_least,at_most}', 'higher'),
+  ('max_clip_seconds', 'Maximum clip length',
+   'Longest single generated video clip, in seconds.',
+   'number', 'seconds', null, '{video}', 'measure', '{equals,at_least,at_most}', 'higher'),
+  ('max_image_megapixels', 'Maximum image size',
+   'Largest generated image, in megapixels.',
+   'number', 'megapixels', null, '{image}', 'measure', '{equals,at_least,at_most}', 'higher'),
+  ('context_window_tokens', 'Context window',
+   'Maximum input context, in tokens.',
+   'number', 'tokens', null, '{text}', 'measure', '{equals,at_least,at_most}', 'higher'),
+  ('parameter_count_billions', 'Model size',
+   'Number of parameters, in billions. Only when the provider has published it.',
+   'number', 'billion parameters', null, '{}', 'measure', '{equals,at_least,at_most}', null),
+  ('price_usd_per_second', 'Price per second',
+   'List price in US dollars per second of generated video or audio.',
+   'number', 'USD per second', null, '{video,speech}', 'measure', '{equals,at_least,at_most}', 'lower'),
+  ('price_usd_per_image', 'Price per image',
+   'List price in US dollars per generated image.',
+   'number', 'USD per image', null, '{image}', 'measure', '{equals,at_least,at_most}', 'lower'),
+  ('price_usd_per_1m_input_tokens', 'Price per million input tokens',
+   'List price in US dollars per one million input tokens.',
+   'number', 'USD per 1M tokens', null, '{text}', 'measure', '{equals,at_least,at_most}', 'lower'),
+  ('price_usd_per_1m_output_tokens', 'Price per million output tokens',
+   'List price in US dollars per one million output tokens.',
+   'number', 'USD per 1M tokens', null, '{text}', 'measure', '{equals,at_least,at_most}', 'lower')
+on conflict (name) do update set
+  label          = excluded.label,
+  description    = excluded.description,
+  unit           = excluded.unit,
+  allowed_values = excluded.allowed_values,
+  modalities     = excluded.modalities,
+  kind           = excluded.kind,
+  operators      = excluded.operators,
+  better         = excluded.better;
+
+-- Everyday words for each capability. A generic word such as "price" may map to
+-- several capabilities; the search picks the ones that fit the modality.
 insert into capability_aliases (capability_name, alias) values
   ('speech_languages', 'voiceover'),
   ('speech_languages', 'voice over'),
@@ -69,23 +106,56 @@ insert into capability_aliases (capability_name, alias) values
   ('background_audio', 'background sound'),
   ('background_audio', 'ambient sound'),
   ('background_audio', 'soundtrack'),
-  ('max_resolution', 'resolution'),
-  ('max_resolution', 'video quality'),
-  ('max_clip_seconds', 'clip length'),
-  ('max_clip_seconds', 'video length'),
-  ('max_clip_seconds', 'duration'),
   ('api_available', 'api'),
   ('api_available', 'api access'),
   ('api_available', 'has api'),
   ('open_weights', 'open source'),
   ('open_weights', 'open model'),
+  ('open_weights', 'open weights'),
   ('open_weights', 'self hosted'),
+  ('open_weights', 'closed source'),
+  ('open_weights', 'proprietary'),
+  ('open_weights', 'open vs closed'),
+  ('deprecated', 'deprecated'),
+  ('deprecated', 'retired'),
+  ('deprecated', 'sunset'),
+  ('deprecated', 'discontinued'),
+  ('deprecated', 'end of life'),
+  ('deprecated', 'legacy'),
+  ('max_resolution', 'resolution'),
+  ('max_resolution', 'video resolution'),
+  ('max_resolution', 'video quality'),
+  ('max_clip_seconds', 'clip length'),
+  ('max_clip_seconds', 'video length'),
+  ('max_clip_seconds', 'duration'),
+  ('max_image_megapixels', 'image size'),
+  ('max_image_megapixels', 'image resolution'),
+  ('max_image_megapixels', 'megapixels'),
   ('context_window_tokens', 'context length'),
   ('context_window_tokens', 'context size'),
   ('context_window_tokens', 'context window'),
-  ('pricing', 'price'),
-  ('pricing', 'cost'),
-  ('pricing', 'how much')
+  ('parameter_count_billions', 'model size'),
+  ('parameter_count_billions', 'parameters'),
+  ('parameter_count_billions', 'parameter count'),
+  ('parameter_count_billions', 'params'),
+  ('price_usd_per_second', 'price'),
+  ('price_usd_per_second', 'cost'),
+  ('price_usd_per_second', 'pricing'),
+  ('price_usd_per_second', 'how much'),
+  ('price_usd_per_image', 'price'),
+  ('price_usd_per_image', 'cost'),
+  ('price_usd_per_image', 'pricing'),
+  ('price_usd_per_image', 'how much'),
+  ('price_usd_per_1m_input_tokens', 'price'),
+  ('price_usd_per_1m_input_tokens', 'cost'),
+  ('price_usd_per_1m_input_tokens', 'pricing'),
+  ('price_usd_per_1m_input_tokens', 'input price'),
+  ('price_usd_per_1m_output_tokens', 'price'),
+  ('price_usd_per_1m_output_tokens', 'cost'),
+  ('price_usd_per_1m_output_tokens', 'pricing'),
+  ('price_usd_per_1m_output_tokens', 'output price'),
+  ('pricing_notes', 'price details'),
+  ('pricing_notes', 'pricing tiers')
 on conflict do nothing;
 
 -- Language names people type, mapped to the code stored in the data.
@@ -104,6 +174,8 @@ from (values
 cross join (values ('speech_languages'), ('output_languages')) as c(name)
 on conflict do nothing;
 
+-- Other values people type. A phrase such as "closed source" resolves to both a
+-- capability (open_weights, via its alias) and a value (false, below).
 insert into value_aliases (capability_name, alias, canonical_value) values
   ('max_resolution', '4k',      '"2160p"'),
   ('max_resolution', 'uhd',     '"2160p"'),
@@ -111,5 +183,18 @@ insert into value_aliases (capability_name, alias, canonical_value) values
   ('max_resolution', 'full hd', '"1080p"'),
   ('max_resolution', 'fhd',     '"1080p"'),
   ('max_resolution', 'hd',      '"720p"'),
-  ('max_resolution', 'sd',      '"480p"')
+  ('max_resolution', 'sd',      '"480p"'),
+  ('open_weights', 'open source',   'true'),
+  ('open_weights', 'open',          'true'),
+  ('open_weights', 'open weights',  'true'),
+  ('open_weights', 'self hosted',   'true'),
+  ('open_weights', 'closed',        'false'),
+  ('open_weights', 'closed source', 'false'),
+  ('open_weights', 'proprietary',   'false'),
+  ('deprecated', 'deprecated',     'true'),
+  ('deprecated', 'retired',        'true'),
+  ('deprecated', 'discontinued',   'true'),
+  ('deprecated', 'not deprecated', 'false'),
+  ('deprecated', 'active',         'false'),
+  ('deprecated', 'current',        'false')
 on conflict do nothing;

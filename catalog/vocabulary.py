@@ -1,12 +1,13 @@
-"""Turning people's words into canonical catalog terms.
+"""Turning people's words into canonical catalog terms (the semantic layer).
 
 Order for every lookup: exact canonical term, then exact alias, then trigram
-similarity (pg_trgm) at or above a threshold, marked approximate. Two candidates
-within AMBIGUITY_MARGIN of each other are reported as ambiguous rather than
-guessed. Anything else is unresolved, with the closest suggestions.
+similarity (pg_trgm) at or above a threshold, marked approximate. An alias shared by
+several capabilities (for example "price") keeps those that fit the searched modality,
+preferring capabilities tagged with that modality over ones that apply to every modality.
+Two candidates still left, or within AMBIGUITY_MARGIN by similarity, are ambiguous.
+Anything else is unresolved, with the closest suggestions.
 
-Thresholds were measured against the draft vocabulary (supabase/seed/vocabulary_draft.sql)
-and are pinned by tests/test_search.py:
+Thresholds were measured against the draft vocabulary and are pinned by tests/test_search.py:
 - capability names: misspellings scored 0.47 to 0.74; unrelated phrases ("frame rate",
   "lip sync", "watermark", "batch api") at most 0.40. Threshold 0.45.
 - values (searched within one capability only): "Hindhi" -> hi scored 0.44, "Englsh" 0.50,
@@ -16,7 +17,6 @@ and are pinned by tests/test_search.py:
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -46,10 +46,16 @@ class Definition:
     unit: str | None
     allowed_values: list[Any] | None
     modalities: list[str]
+    kind: Literal["measure", "filter"]
+    operators: list[str]
+    better: Literal["higher", "lower"] | None
+
+    def applies_to(self, modality: str | None) -> bool:
+        return modality is None or not self.modalities or modality in self.modalities
 
     @property
-    def ordered(self) -> bool:
-        return self.value_type in ("number", "enum")
+    def is_price(self) -> bool:
+        return bool(self.unit) and self.unit.upper().startswith("USD")
 
 
 @dataclass
@@ -58,6 +64,18 @@ class Vocabulary:
     capability_terms: list[tuple[str, str, Literal["name", "alias"]]]  # (normalized term, capability, kind)
     value_terms: dict[str, list[tuple[str, Any, Literal["canonical", "alias"]]]]
     aliases: dict[str, list[str]] = field(default_factory=dict)  # capability -> raw aliases, for display
+
+    def modalities(self) -> set[str]:
+        return {m for d in self.definitions.values() for m in d.modalities}
+
+    def prefer_for_modality(self, names: list[str], modality: str | None) -> list[str]:
+        """Of several capabilities, keep those that fit the modality; tagged ones beat generic ones."""
+        names = list(dict.fromkeys(names))
+        if modality is None:
+            return names
+        fitting = [n for n in names if self.definitions[n].applies_to(modality)]
+        tagged = [n for n in fitting if modality in self.definitions[n].modalities]
+        return tagged or fitting or names
 
 
 @dataclass
@@ -79,7 +97,7 @@ async def _rows(conn: AsyncConnection, query: str, params: Any = None) -> list[d
 async def load_vocabulary(conn: AsyncConnection) -> Vocabulary:
     defs = await _rows(
         conn,
-        """select name, label, description, value_type, unit, allowed_values, modalities
+        """select name, label, description, value_type, unit, allowed_values, modalities, kind, operators, better
            from capability_definitions order by name""",
     )
     definitions = {
@@ -91,6 +109,9 @@ async def load_vocabulary(conn: AsyncConnection) -> Vocabulary:
             unit=d["unit"],
             allowed_values=d["allowed_values"],
             modalities=list(d["modalities"] or []),
+            kind=d["kind"],
+            operators=list(d["operators"] or []),
+            better=d["better"],
         )
         for d in defs
     }
@@ -145,38 +166,83 @@ async def _fuzzy(
     return Resolution("unresolved", candidates=suggestions)
 
 
-async def resolve_capability(conn: AsyncConnection, vocab: Vocabulary, term: str) -> Resolution:
+async def resolve_capability(
+    conn: AsyncConnection, vocab: Vocabulary, term: str, modality: str | None = None
+) -> Resolution:
     norm = normalize(term)
     if not norm:
         return Resolution("unresolved", note="empty")
     for t, name, kind in vocab.capability_terms:
         if t == norm and kind == "name":
             return Resolution("resolved", name, "exact", matched_term=t)
-    for t, name, _kind in vocab.capability_terms:
-        if t == norm:
-            return Resolution("resolved", name, "alias", matched_term=t)
-    return await _fuzzy(conn, norm, [(t, n) for t, n, _ in vocab.capability_terms], CAPABILITY_THRESHOLD)
+    hits = vocab.prefer_for_modality([name for t, name, _ in vocab.capability_terms if t == norm], modality)
+    if len(hits) == 1:
+        return Resolution("resolved", hits[0], "alias", matched_term=norm)
+    if hits:
+        return Resolution("ambiguous", candidates=hits, note="the word is used for several capabilities")
+    fitting = [(t, n) for t, n, _ in vocab.capability_terms if vocab.definitions[n].applies_to(modality)]
+    res = await _fuzzy(conn, norm, fitting, CAPABILITY_THRESHOLD)
+    if res.status == "unresolved" and modality is not None:
+        res = await _fuzzy(conn, norm, [(t, n) for t, n, _ in vocab.capability_terms], CAPABILITY_THRESHOLD)
+    return res
 
 
-_NUMBER = re.compile(r"^\s*(-?\d+(?:[.,]\d+)?)\s*([a-z]*)\s*$")
-_UNIT_FACTORS = {
+def lookup_value_everywhere(vocab: Vocabulary, phrase: str, modality: str | None) -> list[tuple[str, Any]]:
+    """Exact value or value alias across all capabilities ("Hindi" -> speech_languages "hi")."""
+    norm = normalize(phrase)
+    hits: dict[str, Any] = {}
+    for cap, entries in vocab.value_terms.items():
+        for t, canonical, _ in entries:
+            if t == norm and cap not in hits:
+                hits[cap] = canonical
+    keep = vocab.prefer_for_modality(list(hits), modality) if hits else []
+    return [(c, hits[c]) for c in keep]
+
+
+_UNIT_FACTORS: dict[str, dict[str, float]] = {
     "seconds": {"": 1, "s": 1, "sec": 1, "secs": 1, "second": 1, "seconds": 1,
                 "m": 60, "min": 60, "mins": 60, "minute": 60, "minutes": 60, "h": 3600, "hr": 3600, "hour": 3600,
                 "hours": 3600},
     "tokens": {"": 1, "token": 1, "tokens": 1, "k": 1_000, "m": 1_000_000, "million": 1_000_000},
+    "megapixels": {"": 1, "mp": 1, "megapixel": 1, "megapixels": 1},
+    "billion parameters": {"": 1, "b": 1, "billion": 1, "parameters": 1, "parameter": 1, "params": 1},
 }  # fmt: skip
+_USD = {"": 1, "usd": 1, "dollar": 1, "dollars": 1, "$": 1, "cents": 0.01, "cent": 0.01}
+
+
+def unit_factor(unit_word: str, unit: str | None) -> float | None:
+    if unit and unit.upper().startswith("USD"):
+        return _USD.get(unit_word)
+    return _UNIT_FACTORS.get(unit or "", {"": 1}).get(unit_word)
+
+
+def convert_number(number: float, unit_word: str, unit: str | None) -> float | None:
+    factor = unit_factor(unit_word, unit)
+    if factor is None:
+        return None
+    value = number * factor
+    return int(value) if float(value).is_integer() else round(value, 10)
 
 
 def parse_number(text: str, unit: str | None) -> float | None:
-    m = _NUMBER.match(text.casefold())
-    if not m:
+    from catalog.phrases import take_number
+
+    parsed = take_number(text)
+    if parsed.number is None or parsed.words:
         return None
-    number, suffix = float(m.group(1).replace(",", ".")), m.group(2)
-    factors = _UNIT_FACTORS.get(unit or "", {"": 1})
-    if suffix not in factors:
-        return None
-    value = number * factors[suffix]
-    return int(value) if value.is_integer() else value
+    return convert_number(parsed.number, parsed.unit_word, unit)
+
+
+def units_matching(vocab: Vocabulary, unit_word: str, modality: str | None) -> list[str]:
+    """Measures whose unit accepts this unit word ("seconds" -> max_clip_seconds)."""
+    if not unit_word:
+        return []
+    names = [
+        d.name
+        for d in vocab.definitions.values()
+        if d.kind == "measure" and d.value_type == "number" and unit_factor(unit_word, d.unit) is not None
+    ]
+    return vocab.prefer_for_modality(names, modality) if modality else names
 
 
 async def resolve_value(conn: AsyncConnection, vocab: Vocabulary, d: Definition, value: Any) -> Resolution:
@@ -191,15 +257,15 @@ async def resolve_value(conn: AsyncConnection, vocab: Vocabulary, d: Definition,
         return Resolution("resolved", None, "exact", note="no value given; any recorded value counts")
 
     if d.value_type == "json":
-        return Resolution(
-            "unresolved",
-            note=f"values of {d.name} cannot be compared in search; leave the value out, then read the facts",
-        )
+        return Resolution("unresolved", note=f"values of {d.name} cannot be compared in search")
 
     if d.value_type == "boolean":
         if isinstance(value, bool):
             return Resolution("resolved", value, "exact")
         norm = normalize(str(value))
+        for t, canonical, _ in vocab.value_terms.get(d.name, []):
+            if t == norm:
+                return Resolution("resolved", canonical, "alias", matched_term=norm)
         if norm in TRUE_WORDS:
             return Resolution("resolved", True, "alias", matched_term=norm)
         if norm in FALSE_WORDS:
@@ -213,7 +279,7 @@ async def resolve_value(conn: AsyncConnection, vocab: Vocabulary, d: Definition,
         if parsed is None:
             unit = f" in {d.unit}" if d.unit else ""
             return Resolution("unresolved", note=f"expected a number{unit}")
-        return Resolution("resolved", parsed, "exact" if parsed == value else "alias", matched_term=str(value))
+        return Resolution("resolved", parsed, "alias", matched_term=str(value))
 
     if d.value_type == "text":
         return Resolution("resolved", str(value), "exact")
@@ -233,20 +299,25 @@ async def resolve_value(conn: AsyncConnection, vocab: Vocabulary, d: Definition,
     return res
 
 
-async def resolve_modality(conn: AsyncConnection, modality: str | None) -> tuple[str | None, str | None]:
+async def resolve_modality(
+    conn: AsyncConnection, vocab: Vocabulary | None, modality: str | None
+) -> tuple[str | None, str | None]:
     """Return (modality to filter on or None for all, note for the caller)."""
     if modality is None or not normalize(modality):
         return None, None
-    known = [r["m"] for r in await _rows(conn, "select distinct modality as m from models order by 1")]
+    known = {r["m"] for r in await _rows(conn, "select distinct modality as m from models")}
+    if vocab is not None:
+        known |= vocab.modalities()
+    known_sorted = sorted(known)
     norm = normalize(modality)
-    for m in known:
+    for m in known_sorted:
         if normalize(m) in (norm, norm.removesuffix("s")):
             return m, None if normalize(m) == norm else f"'{modality}' read as modality '{m}'"
-    res = await _fuzzy(conn, norm, [(normalize(m), m) for m in known], CAPABILITY_THRESHOLD)
+    res = await _fuzzy(conn, norm, [(normalize(m), m) for m in known_sorted], CAPABILITY_THRESHOLD)
     if res.status == "resolved":
         return res.target, f"'{modality}' read as modality '{res.target}' (approximate)"
-    listed = ", ".join(known) or "none yet"
-    return None, f"modality '{modality}' is not recorded; searched all modalities (recorded: {listed})"
+    listed = ", ".join(known_sorted) or "none yet"
+    return None, f"modality '{modality}' is not known; searched all modalities (known: {listed})"
 
 
 async def resolve_model(conn: AsyncConnection, term: str) -> tuple[dict[str, Any] | None, str | None, list[str]]:

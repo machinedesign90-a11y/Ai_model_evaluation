@@ -44,7 +44,7 @@ def main() -> None:
             "Use 127.0.0.1 or localhost, or set MCP_PUBLIC=true with MCP_API_KEY."
         )
 
-    server = create_server(settings.database_dsn())
+    server = create_server(settings.database_dsn(), floor=settings.verified_query_floor)
     if args.transport == "stdio":
         server.run("stdio")
         return

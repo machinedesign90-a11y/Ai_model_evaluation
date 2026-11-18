@@ -2,9 +2,10 @@
 
 Deliberately not generated from the pydantic models: those produce `$ref`/`$defs`
 and a recursive JsonValue type, which Bedrock may reject. Each schema here is
-plain, with no references or recursion; tests/test_tool_specs.py keeps it that
-way and checks each schema against the catalog's own input validation. The real
-Bedrock smoke test (build step 6) confirms Bedrock accepts them.
+plain, with no references or recursion (arrays of inline objects are fine);
+tests/test_tool_specs.py keeps it that way and checks each schema against the
+catalog's own input validation. The real Bedrock smoke test (build step 6)
+confirms Bedrock accepts them.
 """
 
 from __future__ import annotations
@@ -14,46 +15,73 @@ from typing import Any
 from catalog import tool_docs
 from catalog.schemas import MAX_COMPARE_CAPABILITIES, MAX_REQUIREMENTS, MAX_SEARCH_LIMIT
 
-SAVE_CONTEXT_DESCRIPTION = """\
-Record what you have learned about the user's need, so it is kept with the conversation. Call it whenever \
-you learn the use case or constraints, or settle on a shortlist. Each call replaces the stored values for \
-the fields you pass."""
+SCALAR = ["string", "number", "boolean"]
+
+
+def _entry_schema(what: str) -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "capability": {
+                "type": "string",
+                "description": f"The {what} in the user's words, e.g. 'Hindi voiceover', 'closed source', "
+                "'longer than 10 seconds'. May be left out when the value alone says it ('Hindi', '4K').",
+            },
+            "value": {"type": SCALAR, "description": "The wanted value in the user's words, e.g. 'Hindi', '4K', 15."},
+            "operator": {
+                "type": "string",
+                "enum": ["contains", "equals", "at_least", "at_most"],
+                "description": "Optional; a sensible default is used.",
+            },
+            "importance": {"type": "string", "enum": ["must", "nice"], "description": "must (default) or nice."},
+        },
+        "required": [],
+    }
+
+
+FIND_VERIFIED_QUERY_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {"question": {"type": "string", "description": "The user's question, in their own words."}},
+    "required": ["question"],
+}
+
+RUN_VERIFIED_QUERY_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "id": {"type": "string", "description": "Verified query id from find_verified_query."},
+        "slots": {
+            "type": "object",
+            "description": 'Slot name to value, in the user\'s words, e.g. {"language": "Hindi"}.',
+            "additionalProperties": {"type": SCALAR},
+        },
+    },
+    "required": ["id"],
+}
 
 SEARCH_MODELS_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "modality": {
-            "type": "string",
-            "description": "Output modality such as 'video', 'text', 'image'. Omit to search all.",
-        },
-        "requirements": {
+        "modality": {"type": "string", "description": "Output modality such as 'video', 'text', 'image'."},
+        "filters": {
             "type": "array",
-            "description": f"What the user needs, in their own words. Up to {MAX_REQUIREMENTS}.",
             "maxItems": MAX_REQUIREMENTS,
-            "items": {
-                "type": "object",
-                "properties": {
-                    "capability": {
-                        "type": "string",
-                        "description": "The capability in the user's words, e.g. 'Hindi voiceover', 'resolution'.",
-                    },
-                    "value": {
-                        "type": ["string", "number", "boolean"],
-                        "description": "The wanted value in the user's words, e.g. 'Hindi', '4K', 15, true. Optional.",
-                    },
-                    "operator": {
-                        "type": "string",
-                        "enum": ["contains", "equals", "at_least", "at_most"],
-                        "description": "Optional. Default: at_least for numbers and resolution, else contains.",
-                    },
-                    "importance": {
-                        "type": "string",
-                        "enum": ["must", "nice"],
-                        "description": "must (default) or nice.",
-                    },
-                },
-                "required": ["capability"],
+            "description": "Attributes to include or exclude.",
+            "items": _entry_schema("filter"),
+        },
+        "measures": {
+            "type": "array",
+            "maxItems": MAX_REQUIREMENTS,
+            "description": "Quantities to compare or threshold.",
+            "items": _entry_schema("measure"),
+        },
+        "sort": {
+            "type": "object",
+            "description": "Order by a measure.",
+            "properties": {
+                "capability": {"type": "string", "description": "The measure in the user's words, e.g. 'cheapest'."},
+                "direction": {"type": "string", "enum": ["best", "worst", "asc", "desc"]},
             },
+            "required": ["capability"],
         },
         "limit": {
             "type": "integer",
@@ -97,6 +125,11 @@ COMPARE_MODELS_SCHEMA: dict[str, Any] = {
     "required": ["slugs"],
 }
 
+SAVE_CONTEXT_DESCRIPTION = """\
+Record what you have learned about the user's need, so it is kept with the conversation. Call it whenever \
+you learn the use case or constraints, or settle on a shortlist. Each call replaces the stored values for \
+the fields you pass."""
+
 SAVE_CONTEXT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -105,7 +138,7 @@ SAVE_CONTEXT_SCHEMA: dict[str, Any] = {
             "type": "object",
             "description": (
                 "The user's requirements, keyed by canonical capability names where one fits "
-                "(e.g. speech_languages, max_resolution, api_available), plus modality."
+                "(e.g. speech_languages, max_resolution, price_usd_per_second), plus modality."
             ),
         },
         "shortlist": {
@@ -118,13 +151,36 @@ SAVE_CONTEXT_SCHEMA: dict[str, Any] = {
     "required": [],
 }
 
+OFFER_FOLLOWUPS_DESCRIPTION = """\
+End every answer with this: up to two short follow-up questions the user is likely to want next (for example \
+"Which of these is cheapest?"). They are shown as tappable suggestions; each one costs the user a free message, \
+so make them worth it."""
+
+OFFER_FOLLOWUPS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "suggestions": {
+            "type": "array",
+            "items": {"type": "string", "maxLength": 120},
+            "maxItems": 2,
+            "description": "Up to two follow-up questions, in the user's voice.",
+        }
+    },
+    "required": ["suggestions"],
+}
+
 CATALOG_TOOLS = {
+    "find_verified_query": (tool_docs.FIND_VERIFIED_QUERY, FIND_VERIFIED_QUERY_SCHEMA),
+    "run_verified_query": (tool_docs.RUN_VERIFIED_QUERY, RUN_VERIFIED_QUERY_SCHEMA),
     "search_models": (tool_docs.SEARCH_MODELS, SEARCH_MODELS_SCHEMA),
     "list_capabilities": (tool_docs.LIST_CAPABILITIES, LIST_CAPABILITIES_SCHEMA),
     "get_model": (tool_docs.GET_MODEL, GET_MODEL_SCHEMA),
     "compare_models": (tool_docs.COMPARE_MODELS, COMPARE_MODELS_SCHEMA),
 }
-INTERNAL_TOOLS = {"save_context": (SAVE_CONTEXT_DESCRIPTION, SAVE_CONTEXT_SCHEMA)}
+INTERNAL_TOOLS = {
+    "save_context": (SAVE_CONTEXT_DESCRIPTION, SAVE_CONTEXT_SCHEMA),
+    "offer_followups": (OFFER_FOLLOWUPS_DESCRIPTION, OFFER_FOLLOWUPS_SCHEMA),
+}
 
 
 def tool_config() -> dict[str, Any]:

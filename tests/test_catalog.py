@@ -5,7 +5,14 @@ from __future__ import annotations
 import psycopg
 import pytest
 
-from catalog import CatalogInputError, compare_models, get_model, list_capabilities, search_models
+from catalog import (
+    CatalogInputError,
+    compare_models,
+    find_verified_query,
+    get_model,
+    list_capabilities,
+    search_models,
+)
 from tests.fixtures import INJECTION_TEXT
 
 # --- get_model ---------------------------------------------------------------------------------
@@ -16,8 +23,8 @@ async def test_get_model_returns_all_facts_with_provenance_including_price_and_a
     assert (r.status, r.matched_by) == ("found", "slug")
     facts = {f.name: f for f in r.model.facts}
     assert list(facts) == sorted(facts)
-    assert facts["pricing"].value == {"unit": "per_second", "amount": 0.5, "currency": "USD"}
-    assert facts["pricing"].verification_status == "verified" and facts["pricing"].source_url
+    assert facts["price_usd_per_second"].value == 0.5
+    assert facts["price_usd_per_second"].verification_status == "verified" and facts["price_usd_per_second"].source_url
     assert facts["api_available"].value is True and facts["api_available"].source_type == "official_docs"
     assert (
         facts["max_resolution"].verification_status == "unverified" and facts["max_resolution"].last_verified_at is None
@@ -43,7 +50,7 @@ async def test_get_model_not_found_suggests(aconn):
 
 async def test_unrecorded_price_and_api_are_simply_absent(aconn):
     m = (await get_model(aconn, "testco-gamma")).model
-    assert {f.name for f in m.facts} == {"audio_generation", "max_resolution"}
+    assert {f.name for f in m.facts} == {"audio_generation", "max_resolution", "deprecated"}
     assert m.display_description is None
 
 
@@ -52,10 +59,10 @@ async def test_unrecorded_price_and_api_are_simply_absent(aconn):
 
 async def test_compare_defaults_to_union_and_reports_not_recorded(aconn):
     r = await compare_models(aconn, ["testco-alpha", "testco-gamma"])
-    assert "pricing" in r.capability_names and "api_available" in r.capability_names
+    assert {"price_usd_per_second", "api_available", "deprecated"} <= set(r.capability_names)
     alpha, gamma = r.models
-    assert alpha.not_recorded == []
-    assert "speech_languages" in gamma.not_recorded and "pricing" in gamma.not_recorded
+    assert alpha.not_recorded == ["deprecated"]
+    assert "speech_languages" in gamma.not_recorded and "price_usd_per_second" in gamma.not_recorded
 
 
 async def test_compare_accepts_names_and_everyday_capability_words(aconn):
@@ -65,15 +72,21 @@ async def test_compare_accepts_names_and_everyday_capability_words(aconn):
     assert [(m.slug, m.matched_by) for m in r.models] == [
         ("testco-alpha", "name"), ("testco-beta", "slug"), ("testco-gamma", "approximate"),
     ]  # fmt: skip
-    assert r.capability_names == ["pricing", "max_resolution", "speech_languages"]
+    assert r.capability_names == ["price_usd_per_second", "max_resolution", "speech_languages"]
     assert [(c.input, c.capability, c.confidence) for c in r.capability_interpretation] == [
-        ("price", "pricing", "alias"),
+        ("price", "price_usd_per_second", "alias"),
         ("resolution", "max_resolution", "alias"),
         ("dubbing", "speech_languages", "alias"),
     ]
     assert [(u.part, u.term) for u in r.unresolved] == [("capability", "lip sync")]
-    beta = r.models[1]
-    assert beta.not_recorded == ["pricing"]
+    gamma = r.models[2]
+    assert gamma.not_recorded == ["price_usd_per_second", "speech_languages"]
+
+
+async def test_compare_across_modalities_shows_each_fitting_price(aconn):
+    r = await compare_models(aconn, ["testco-alpha", "testco-zeta"], ["price"])
+    assert r.capability_names == ["price_usd_per_second", "price_usd_per_image"]
+    assert [m.facts[0].name for m in r.models] == ["price_usd_per_second", "price_usd_per_image"]
 
 
 async def test_compare_reports_unknown_and_duplicate_models(aconn):
@@ -95,11 +108,15 @@ async def test_list_capabilities_filters_by_modality(aconn):
     video = await list_capabilities(aconn, "Videos")
     names = {c.name for c in video.capabilities}
     assert video.modality == "video"
-    assert {"speech_languages", "max_resolution", "pricing", "api_available"} <= names
-    assert "context_window_tokens" not in names
+    assert {"speech_languages", "max_resolution", "price_usd_per_second", "api_available"} <= names
+    assert {"context_window_tokens", "price_usd_per_image"}.isdisjoint(names)
     speech = next(c for c in video.capabilities if c.name == "speech_languages")
     assert speech.value_type == "enum_list" and "hi" in speech.allowed_values and speech.example_aliases
-    assert len((await list_capabilities(aconn)).capabilities) == 12
+    assert (speech.kind, speech.operators, speech.better) == ("filter", ["contains"], None)
+    price = next(c for c in video.capabilities if c.name == "price_usd_per_second")
+    assert (price.kind, price.better, price.unit) == ("measure", "lower", "USD per second")
+    assert "at_most" in price.operators
+    assert len((await list_capabilities(aconn)).capabilities) == 19
 
 
 async def test_list_capabilities_for_a_modality_with_no_models_yet(aconn):
@@ -129,12 +146,13 @@ INJECTIONS = [
 async def test_sql_injection_style_inputs_are_plain_data(aconn, catalog_dsn, evil):
     r = await get_model(aconn, evil)
     assert r.status == "not_found" or r.model.slug == "testco-alpha"  # the union string contains the slug
-    r = await search_models(aconn, evil, [{"capability": evil, "value": evil}])
+    r = await search_models(aconn, evil, [{"capability": evil, "value": evil}], [{"value": evil}], {"capability": evil})
     assert r.searched_modality is None
+    await find_verified_query(aconn, evil)
     await compare_models(aconn, ["testco-alpha", evil], [evil])
     await list_capabilities(aconn, evil[:50])
     with psycopg.connect(catalog_dsn) as conn:
-        assert conn.execute("select count(*) from models").fetchone()[0] == 5
+        assert conn.execute("select count(*) from models").fetchone()[0] == 6
 
 
 async def test_catalog_works_on_a_read_only_connection(catalog_dsn):
@@ -142,7 +160,7 @@ async def test_catalog_works_on_a_read_only_connection(catalog_dsn):
     async with await psycopg.AsyncConnection.connect(
         catalog_dsn, autocommit=True, options="-c default_transaction_read_only=on"
     ) as conn:
-        await search_models(conn, "video", [{"capability": "Hindi voiceover"}])
+        await search_models(conn, "video", [{"capability": "Hindi voiceover"}], sort={"capability": "cheapest"})
         await get_model(conn, "TestModel Alfa")
         await compare_models(conn, ["testco-alpha", "testco-beta"], ["price"])
         await list_capabilities(conn, "video")

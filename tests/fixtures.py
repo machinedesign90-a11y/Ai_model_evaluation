@@ -120,8 +120,9 @@ def seed_catalog(conn: Connection) -> None:
     _cap(conn, alpha, "background_audio", True, scraped, verified=False)
     _cap(conn, alpha, "max_resolution", "1080p", scraped, verified=False)
     _cap(conn, alpha, "max_clip_seconds", 10, docs, verified=True)
-    _cap(conn, alpha, "pricing", {"unit": "per_second", "amount": 0.5, "currency": "USD"}, docs, verified=True)
+    _cap(conn, alpha, "price_usd_per_second", 0.5, docs, verified=True)
     _cap(conn, alpha, "api_available", True, docs, verified=True)
+    _cap(conn, alpha, "open_weights", False, docs, verified=True)
 
     beta = _model(conn, name="TestModel Beta", slug="testco-beta", modality="video")
     _cap(conn, beta, "speech_languages", ["en"], docs, verified=True)
@@ -129,12 +130,15 @@ def seed_catalog(conn: Connection) -> None:
     _cap(conn, beta, "background_audio", False, docs, verified=True)
     _cap(conn, beta, "max_resolution", "2160p", docs, verified=True)
     _cap(conn, beta, "max_clip_seconds", 20, docs, verified=True)
+    _cap(conn, beta, "price_usd_per_second", 0.2, docs, verified=True)
     _cap(conn, beta, "api_available", False, docs, verified=True)
+    _cap(conn, beta, "open_weights", True, scraped, verified=False)
 
-    # Gamma has no speech_languages, background_audio or clip length rows: "not recorded".
+    # Gamma has no speech_languages, background_audio, clip length or price rows: "not recorded".
     gamma = _model(conn, name="TestModel Gamma", slug="testco-gamma", modality="video")
     _cap(conn, gamma, "audio_generation", True, scraped, verified=False)
     _cap(conn, gamma, "max_resolution", "720p", docs, verified=True)
+    _cap(conn, gamma, "deprecated", True, docs, verified=True)
 
     # Epsilon has no facts at all.
     _model(conn, name="TestModel Epsilon", slug="testco-epsilon", modality="video")
@@ -143,3 +147,19 @@ def seed_catalog(conn: Connection) -> None:
     delta = _model(conn, name="TestModel Delta", slug="testco-delta", modality="text", description=INJECTION_TEXT)
     _cap(conn, delta, "context_window_tokens", 100000, docs, verified=True)
     _cap(conn, delta, "output_languages", ["en", "hi"], scraped, verified=False)
+    _cap(conn, delta, "price_usd_per_1m_input_tokens", 1.5, docs, verified=True)
+
+    zeta = _model(conn, name="TestModel Zeta", slug="testco-zeta", modality="image")
+    _cap(conn, zeta, "max_image_megapixels", 4, docs, verified=True)
+    _cap(conn, zeta, "price_usd_per_image", 0.04, docs, verified=True)
+
+
+def verify_all_draft_queries(conn: Connection) -> None:
+    """TEST DATABASES ONLY: mark the draft verified queries as verified so tier 1 can be exercised.
+
+    The seed file itself keeps every entry 'draft'; only a person verifies a query for real.
+    """
+    conn.execute(
+        "update verified_queries set status = 'verified', verified_by = 'test-fixture', verified_at = now()"
+        " where status = 'draft'"
+    )

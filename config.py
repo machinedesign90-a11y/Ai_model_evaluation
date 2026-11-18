@@ -30,6 +30,10 @@ class Settings(BaseSettings):
     aws_region: str = "us-east-1"
     bedrock_model_id: str | None = None
 
+    # Tier 1 and the semantic layer
+    verified_query_floor: float = Field(default=0.15, ge=0, le=1)
+    semantic_layer_ttl_seconds: int = Field(default=3600, ge=0)
+
     # Agent behaviour
     free_tier_message_limit: int = Field(default=4, ge=0)
     session_ttl_hours: int = Field(default=24, ge=1)

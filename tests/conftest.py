@@ -54,3 +54,13 @@ async def aconn(catalog_dsn: str):
     """Async connection to a database holding the fictional catalog."""
     async with await psycopg.AsyncConnection.connect(catalog_dsn, autocommit=True) as conn:
         yield conn
+
+
+@pytest.fixture
+async def aconn_tier1(catalog_dsn: str, db: psycopg.Connection):
+    """Fictional catalog with the draft verified queries marked verified (test databases only)."""
+    from tests.fixtures import verify_all_draft_queries
+
+    verify_all_draft_queries(db)
+    async with await psycopg.AsyncConnection.connect(catalog_dsn, autocommit=True) as conn:
+        yield conn

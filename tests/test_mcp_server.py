@@ -25,7 +25,8 @@ from mcp.shared._httpx_utils import create_mcp_http_client
 from mcp_server.server import create_server
 
 ROOT = Path(__file__).resolve().parent.parent
-TOOLS = {"search_models", "list_capabilities", "get_model", "compare_models"}
+TOOLS = {"find_verified_query", "run_verified_query", "search_models", "list_capabilities", "get_model",
+         "compare_models"}  # fmt: skip
 API_KEY = "k" * 40
 
 
@@ -35,7 +36,11 @@ def payload(result):
 
 
 @pytest.fixture
-def server(catalog_dsn):
+def server(catalog_dsn, db):
+    from tests.fixtures import verify_all_draft_queries
+
+    verify_all_draft_queries(db)  # test database only, so tier 1 can be exercised
+
     @asynccontextmanager
     async def connect():
         async with await psycopg.AsyncConnection.connect(
@@ -46,10 +51,10 @@ def server(catalog_dsn):
     return create_server(connection=connect)
 
 
-async def test_lists_the_four_read_only_tools(server):
+async def test_lists_the_six_read_only_tools(server):
     async with Client(server) as client:
         tools = {t.name: t for t in (await client.list_tools()).tools}
-    assert set(tools) == TOOLS  # save_context stays internal to the agent
+    assert set(tools) == TOOLS  # save_context and offer_followups stay internal to the agent
     for t in tools.values():
         assert t.description and t.output_schema
         assert t.annotations.read_only_hint is True
@@ -59,7 +64,12 @@ async def test_calls_each_tool(server):
     async with Client(server) as client:
         s = payload(
             await client.call_tool(
-                "search_models", {"modality": "video", "requirements": [{"capability": "Hindi voiceover"}]}
+                "search_models",
+                {
+                    "modality": "video",
+                    "filters": [{"capability": "Hindi voiceover"}],
+                    "sort": {"capability": "cheapest"},
+                },
             )
         )
         assert [m["slug"] for m in s["full_matches"]] == ["testco-alpha"]
@@ -72,13 +82,21 @@ async def test_calls_each_tool(server):
         g = payload(await client.call_tool("get_model", {"slug": "TestModel Beta"}))
         assert g["status"] == "found" and g["matched_by"] == "name"
         assert {f["name"]: f["value"] for f in g["model"]["facts"]}["api_available"] is False
+        assert "kind" in caps["capabilities"][0]
 
         c = payload(
             await client.call_tool(
                 "compare_models", {"slugs": ["testco-alpha", "testco-gamma"], "capability_names": ["price"]}
             )
         )
-        assert c["models"][1]["not_recorded"] == ["pricing"]
+        assert c["models"][1]["not_recorded"] == ["price_usd_per_second"]
+
+        f = payload(await client.call_tool("find_verified_query", {"question": "cheapest ai video"}))
+        top = f["candidates"][0]
+        assert top["title"] == "Cheapest video models"
+        r = payload(await client.call_tool("run_verified_query", {"id": top["id"]}))
+        assert [m["slug"] for m in r["full_matches"]][:2] == ["testco-beta", "testco-alpha"]
+        assert r["verified_query"]["title"] == "Cheapest video models"
 
 
 async def test_invalid_arguments_return_a_tool_error(server):
@@ -206,3 +224,12 @@ def test_loopback_hosts_allowed():
     from mcp_server.__main__ import is_loopback
 
     assert all(is_loopback(h) for h in ("localhost", "127.0.0.1", "::1"))
+
+
+async def test_mcp_run_verified_query_does_not_write(server, catalog_dsn):
+    """The MCP server is read-only: running a verified query there does not touch usage counts."""
+    async with Client(server) as client:
+        f = payload(await client.call_tool("find_verified_query", {"question": "longest video generation"}))
+        payload(await client.call_tool("run_verified_query", {"id": f["candidates"][0]["id"]}))
+    with psycopg.connect(catalog_dsn) as conn:
+        assert conn.execute("select sum(times_matched) from verified_queries").fetchone()[0] == 0
