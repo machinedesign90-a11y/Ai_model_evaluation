@@ -29,7 +29,7 @@ config.py              settings from the environment / .env (fails fast on missi
 supabase/migrations/   SQL schema
 catalog/               shared catalog logic: search_models, get_model, compare_models
 mcp_server/            MCP server wrapping catalog/ (stdio and streamable HTTP)
-agent/                 Bedrock Converse loop, streaming chat endpoint, sessions   (step 4+, not built)
+agent/                 tool_specs.py (flat Bedrock tool schemas); Bedrock loop, chat endpoint, sessions (step 4+)
 tests/                 pytest: schema, catalog, MCP (real PostgreSQL, fictional fixture data)
 tests/eval/            question set for comparing Bedrock models                 (step 8, not built)
 scripts/               helper scripts
@@ -75,17 +75,28 @@ uv run python -m mcp_server --transport http --port 8001
 uv run python scripts/mcp_smoke.py http://localhost:8001/mcp
 ```
 
-Uses `mcp` SDK 2.x (`MCPServer`, formerly `FastMCP`). The HTTP endpoint has no authentication yet; see
-the deploy step before exposing it publicly.
+Uses `mcp` SDK 2.x (`MCPServer`, formerly `FastMCP`). The HTTP transport has no authentication, so in
+phase one it only binds to a loopback address and is not deployed: the agent calls `catalog/` in-process.
+Before outside agents use it, put an API key in front of it.
+
+### Data standard
+
+`docs/DATA_STANDARD.md` tells the data team how to record facts. Its vocabulary table is generated from
+`capability_definitions`; after adding a name in a new migration, refresh it:
+
+```bash
+uv run python scripts/data_standard.py
+```
 
 ## Database
 
-Apply the migration with the Supabase CLI (`supabase db push`) or any Postgres
+Apply the migrations with the Supabase CLI (`supabase db push`) or any Postgres
 client. Tables:
 
 | Table | Purpose |
 | --- | --- |
-| `models`, `capabilities`, `sources` | The curated catalog. One capability fact per row, each with a source and a verified or unverified status. A missing row means "not recorded". |
+| `models`, `capabilities`, `sources` | The curated catalog. One capability fact per row, each with a source and a verified or unverified status. A missing row means "not recorded". Pricing and API availability are capability rows too; `models.description` is display text only. |
+| `capability_definitions`, `language_codes` | The controlled vocabulary: allowed capability names, value types, allowed values, and ISO 639-1 language codes. The database rejects anything else. See `docs/DATA_STANDARD.md`. |
 | `profiles` | One row per registered user, with the free-tier counter (`messages_used`, `message_limit`). |
 | `conversations`, `messages` | Stored chat history, plus the use case, constraints and shortlist captured for phase two. |
 | `queries` | Log of questions and which ones could not be answered, to find data gaps. |
@@ -112,7 +123,8 @@ Supabase project.
 
 ## Status
 
-Done: steps 0 to 3 of `docs/BUILD_PLAN.md` (setup, database harness, catalog module, MCP server).
+Done: steps 0 to 3 of `docs/BUILD_PLAN.md` (setup, database harness, catalog module, MCP server), the
+capability vocabulary migration, and the agent's flat Bedrock tool specs.
 
 Next:
 

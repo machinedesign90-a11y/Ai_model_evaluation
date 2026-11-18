@@ -45,6 +45,13 @@ UI (built by someone else)  ->  agent service (FastAPI, streaming)
   not part of this build. Do not scrape or invent catalog data.
 - Avoid heavy agent frameworks. The flow is short: understand the need, call two or three tools, explain.
 - Plain Postgres only in the core schema (the sole Supabase-specific piece is `auth.users`).
+- Every claim is a capability row with provenance. Pricing and API availability are capabilities
+  (`pricing`, `api_available`), not columns. `models.description` is display text only.
+- Capability names and value formats are a controlled vocabulary in `capability_definitions`, enforced by
+  the database. Languages are ISO 639-1 codes. New names go in a new migration, then refresh
+  `docs/DATA_STANDARD.md` with `scripts/data_standard.py`.
+- The MCP server is not exposed publicly in phase one; the agent calls `catalog/` in-process.
+- Bedrock tool schemas are flat and hand-written (`agent/tool_specs.py`); never generate them from pydantic.
 
 ## Hard rules
 
@@ -73,5 +80,8 @@ UI (built by someone else)  ->  agent service (FastAPI, streaming)
 ## Already built
 
 - `supabase/migrations/20261118000000_initial_schema.sql`: catalog, profiles with the free-tier counter,
-  conversations, messages, queries, row-level security. Tested on PostgreSQL 16.
-- `.env.example`, `README.md`.
+  conversations, messages, queries, row-level security.
+- `supabase/migrations/20261118000100_capability_vocabulary.sql`: capability vocabulary and language codes;
+  pricing and API availability moved to capability rows.
+- Build steps 0 to 3: settings, database test harness, `catalog/`, `mcp_server/`; flat Bedrock tool specs.
+- `.env.example`, `README.md`, `docs/DATA_STANDARD.md`.
